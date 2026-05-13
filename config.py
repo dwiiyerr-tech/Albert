@@ -44,10 +44,21 @@ STOP_LOSS_PCT = 0.20         # 20% stop-loss below entry
 TRAILING_STOP_TRIGGER = 0.20 # activate trailing stop after 20% profit
 
 # ─── Simulation Parameters ────────────────────────────────────────────────────
-SIM_ROUNDS = 3               # debate rounds per city simulation
+SIM_ROUNDS = 3               # debate rounds per city simulation (classic mode)
 MAX_AGENTS_PER_SIM = 4       # weather analyst agents per city
 CONSENSUS_THRESHOLD = 0.65   # probability threshold for high-confidence signal
 HIGH_SPREAD_THRESHOLD_F = 8.0  # model disagreement above this → force low-confidence
+
+# ─── Scenario Speculation ─────────────────────────────────────────────────────
+# When enabled, simulation uses a 3-phase protocol:
+#   Phase 1 — Morgan generates 2-3 explicit future weather scenarios
+#   Phase 2 — 4 analysts estimate P(YES | each scenario) independently
+#   Phase 3 — River synthesises: P(YES) = Σ P(scenario_i) × mean_P(YES|scenario_i)
+# This is more accurate than naive averaging, especially when models disagree.
+SCENARIO_SPECULATION = os.getenv("SCENARIO_SPECULATION", "true").lower() != "false"
+# Only activate scenario mode when model spread exceeds this threshold (°F).
+# Set to 0.0 to always use scenarios; set to 99.0 to always use classic debate.
+SCENARIO_THRESHOLD_F = float(os.getenv("SCENARIO_THRESHOLD_F", "0.0"))
 
 # ─── Monitored Cities ────────────────────────────────────────────────────────
 CITIES = [

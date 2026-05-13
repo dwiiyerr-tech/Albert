@@ -242,21 +242,38 @@ class AlbertDashboard:
 
         forecast_f = forecasts.get(city, 0.0)
         markets = state.get("last_markets", {}).get(city, [])
+        last_sim = state.get("last_sim_result", {}).get(city)
 
         lines = Text()
         lines.append(f" {city}", style="bold white")
-        lines.append(f"  —  forecast: {forecast_f:.1f}°F\n\n", style="dim white")
+        lines.append(f"  —  forecast: {forecast_f:.1f}°F\n", style="dim white")
+
+        # Show scenarios if last simulation used scenario mode
+        if last_sim and last_sim.get("scenarios"):
+            lines.append(" ◆ Scenarios (Morgan)\n", style="bold magenta")
+            for sc in last_sim["scenarios"]:
+                p_bar = "▓" * int(sc["probability"] * 12)
+                p_bar += "░" * (12 - len(p_bar))
+                lines.append(f"  {p_bar} {sc['probability']:.0%} ", style="magenta")
+                lines.append(f"{sc['name'][:28]}", style="white")
+                lines.append(f" {sc['expected_temp_f']:.0f}°F\n", style="dim cyan")
+            reasoning = last_sim.get("scenario_reasoning", "")
+            if reasoning:
+                lines.append(f" River: {reasoning[:70]}\n", style="dim italic white")
+            lines.append("\n")
+        else:
+            lines.append("\n")
 
         if markets:
-            for m in markets[:6]:
+            for m in markets[:5]:
                 lo = m["bucket_low"]
                 hi = m["bucket_high"]
                 lo_str = f"{lo:.0f}" if lo != float("-inf") else "−∞"
                 hi_str = f"{hi:.0f}" if hi != float("inf") else "+∞"
                 bucket = f"{lo_str}–{hi_str}°F"
                 p = m["price_yes"]
-                bar_len = max(1, int(p * 22))
-                bar = "█" * bar_len + "░" * (22 - bar_len)
+                bar_len = max(1, int(p * 20))
+                bar = "█" * bar_len + "░" * (20 - bar_len)
                 p_style = "bold green" if p > 0.55 else "bold red" if p < 0.35 else "yellow"
                 lines.append(f" {bucket:<14}", style="dim white")
                 lines.append(f"{bar}", style=p_style)

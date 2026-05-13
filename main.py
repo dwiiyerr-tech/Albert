@@ -103,6 +103,7 @@ class MiroWeatherAgent:
             "last_signals": [],
             "last_markets": {},
             "last_forecast": {},
+            "last_sim_result": {},   # city → scenario/confidence data from last sim
         }
 
     # ─── Learning pipeline ────────────────────────────────────────────────────
@@ -307,6 +308,18 @@ class MiroWeatherAgent:
 
             all_sims.append(sim)
 
+            # Share scenario data with TUI
+            if sim.used_scenario_mode:
+                self._cycle_state["last_sim_result"][city_name] = {
+                    "scenarios": [
+                        {"name": s.name, "probability": s.probability,
+                         "expected_temp_f": s.expected_temp_f}
+                        for s in sim.scenarios
+                    ],
+                    "scenario_reasoning": sim.scenario_reasoning,
+                    "used_scenario_mode": True,
+                }
+
             self.memory.record_prediction(
                 city=city_name,
                 target_date=target_str,
@@ -376,6 +389,7 @@ class MiroWeatherAgent:
         self._cycle_state["last_signals"] = []
         self._cycle_state["last_markets"] = {}
         self._cycle_state["last_forecast"] = {}
+        self._cycle_state["last_sim_result"] = {}
         self._cycle_state["current_city"] = "—"
 
         logger.info("═══ MiroWeather cycle: target=%s | lessons=%d | resolved=%d ═══",
