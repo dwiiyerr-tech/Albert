@@ -6,12 +6,32 @@ import os
 import sys
 
 
+def _load_dotenv() -> None:
+    """Load .env file into os.environ without overriding already-set env vars."""
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_file):
+        return
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+_load_dotenv()
+
+
 def _require_env(name: str) -> str:
     """Return env var value or exit with a clear message if missing."""
     val = os.getenv(name, "")
     if not val:
         print(f"ERROR: required environment variable {name!r} is not set. "
-              f"Set it before running MiroWeather.", file=sys.stderr)
+              f"Run 'python main.py --setup' to configure Albert.", file=sys.stderr)
         sys.exit(1)
     return val
 
@@ -33,21 +53,21 @@ POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 POLYMARKET_API_KEY = os.getenv("POLYMARKET_API_KEY", "")
 
 # ─── Trading Parameters ───────────────────────────────────────────────────────
-MIN_EV = 0.10                # minimum expected value to enter a trade
-MAX_SPREAD = 0.03            # maximum bid-ask spread (3%)
-MIN_VOLUME = 500             # minimum contract volume
-MIN_HOURS_TO_RESOLUTION = 2
-MAX_HOURS_TO_RESOLUTION = 72
-KELLY_FRACTION = 0.25        # fractional Kelly (25%)
-MAX_TRADE_SIZE_USD = 20.0
-STOP_LOSS_PCT = 0.20         # 20% stop-loss below entry
-TRAILING_STOP_TRIGGER = 0.20 # activate trailing stop after 20% profit
+MIN_EV = float(os.getenv("MIN_EV", "0.10"))
+MAX_SPREAD = float(os.getenv("MAX_SPREAD", "0.03"))
+MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500"))
+MIN_HOURS_TO_RESOLUTION = float(os.getenv("MIN_HOURS_TO_RESOLUTION", "2"))
+MAX_HOURS_TO_RESOLUTION = float(os.getenv("MAX_HOURS_TO_RESOLUTION", "72"))
+KELLY_FRACTION = float(os.getenv("KELLY_FRACTION", "0.25"))
+MAX_TRADE_SIZE_USD = float(os.getenv("MAX_TRADE_SIZE_USD", "20.0"))
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.20"))
+TRAILING_STOP_TRIGGER = float(os.getenv("TRAILING_STOP_TRIGGER", "0.20"))
 
 # ─── Simulation Parameters ────────────────────────────────────────────────────
-SIM_ROUNDS = 3               # debate rounds per city simulation (classic mode)
+SIM_ROUNDS = int(os.getenv("SIM_ROUNDS", "3"))
 MAX_AGENTS_PER_SIM = 4       # weather analyst agents per city
-CONSENSUS_THRESHOLD = 0.65   # probability threshold for high-confidence signal
-HIGH_SPREAD_THRESHOLD_F = 8.0  # model disagreement above this → force low-confidence
+CONSENSUS_THRESHOLD = float(os.getenv("CONSENSUS_THRESHOLD", "0.65"))
+HIGH_SPREAD_THRESHOLD_F = float(os.getenv("HIGH_SPREAD_THRESHOLD_F", "8.0"))
 
 # ─── Scenario Speculation ─────────────────────────────────────────────────────
 # When enabled, simulation uses a 3-phase protocol:
@@ -86,4 +106,4 @@ CITIES = [
 
 # ─── Simulation ──────────────────────────────────────────────────────────────
 SIM_STATE_FILE = "sim_state.json"
-UPDATE_INTERVAL_SECONDS = 3600  # 60 minutes
+UPDATE_INTERVAL_SECONDS = int(os.getenv("UPDATE_INTERVAL_SECONDS", "3600"))
