@@ -1,23 +1,43 @@
 """
 Polymarket Scanner — from WeatherBot (alteregoeth-ai/weatherbot)
 
-Queries the Polymarket CLOB and Gamma APIs for temperature prediction markets,
-then feeds them to the EV calculator with simulation probabilities.
+Execution upgrades:
+  - requests.Session with connection pooling (persistent TCP, keep-alive)
+  - Parallel order-book fetching via ThreadPoolExecutor
+  - Token-bucket rate limiter to stay within Polymarket API limits
 """
 from __future__ import annotations
 
 import datetime
 import logging
-import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
 
-from config import POLYMARKET_BASE, POLYMARKET_GAMMA
+from config import POLYMARKET_BASE, POLYMARKET_GAMMA, MAX_PARALLEL_ORDERBOOKS
 from weather_data import parse_temp_range
 
 logger = logging.getLogger(__name__)
+
+
+class _RateLimiter:
+    """Simple token-bucket rate limiter — thread-safe."""
+
+    def __init__(self, calls_per_second: float = 5.0) -> None:
+        self._interval = 1.0 / calls_per_second
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            gap = self._interval - (now - self._last)
+            if gap > 0:
+                time.sleep(gap)
+            self._last = time.monotonic()
 
 
 class MarketScanner:
@@ -26,9 +46,23 @@ class MarketScanner:
     _WEATHER_KEYWORDS = ["temperature", "temp", "degrees", "°f", "high", "low",
                           "weather", "forecast"]
 
+    def __init__(self) -> None:
+        self._session = requests.Session()
+        self._session.headers.update({"Accept": "application/json"})
+        # Adapters for connection pooling (pool_connections=10 TCP connections)
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=2,
+        )
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
+        self._rate = _RateLimiter(calls_per_second=5.0)
+
     def _get(self, url: str, params: dict = None, timeout: int = 10) -> Optional[dict | list]:
+        self._rate.wait()
         try:
-            resp = requests.get(url, params=params or {}, timeout=timeout)
+            resp = self._session.get(url, params=params or {}, timeout=timeout)
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
@@ -48,80 +82,101 @@ class MarketScanner:
         except Exception:
             return 0.0
 
+    def _fetch_market_entry(self, market: dict) -> Optional[dict]:
+        """
+        Fetch the live order book for one market and return a complete market dict,
+        or None if the market should be skipped.
+        Runs in parallel threads — no shared-state writes.
+        """
+        question = market.get("question", "")
+        bucket = parse_temp_range(question)
+        if not bucket:
+            return None
+
+        clob_token_ids = market.get("clobTokenIds", [""])
+        clob_token_id = clob_token_ids[0] if clob_token_ids else ""
+        no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else ""
+        if not clob_token_id:
+            return None
+
+        ob = self._get(f"{POLYMARKET_BASE}/book", params={"token_id": clob_token_id})
+        if not ob:
+            return None
+
+        try:
+            asks = ob.get("asks") or []
+            bids = ob.get("bids") or []
+            best_ask = float(asks[0].get("price", 1.0)) if asks else 1.0
+            best_bid = float(bids[0].get("price", 0.0)) if bids else 0.0
+            spread = best_ask - best_bid
+            if spread < 0:
+                return None
+            mid = max(0.01, min(0.99, (best_ask + best_bid) / 2))
+            volume = float(market.get("volume", 0))
+            hours = self._hours_until_resolution(market.get("endDate", ""))
+        except (ValueError, TypeError, IndexError) as exc:
+            logger.debug("Order book parse failed: %s", exc)
+            return None
+
+        b_low, b_high = bucket[0], bucket[1]
+        if b_low != float("-inf") and b_high != float("inf") and b_low >= b_high:
+            b_low, b_high = b_high, b_low
+
+        return {
+            "market_id": clob_token_id,    # CLOB YES token ID for OrderArgs
+            "no_token_id": no_token_id,     # CLOB NO token ID
+            "question": question,
+            "price_yes": mid,
+            "price_no": 1 - mid,
+            "spread": spread,
+            "volume": volume,
+            "hours_to_resolution": hours,
+            "bucket_low": b_low,
+            "bucket_high": b_high,
+        }
+
     def get_open_markets(self, city_name: str) -> list[dict]:
         """
         Return open Polymarket markets mentioning a city and temperature keywords.
-        Each result dict: {market_id, question, price_yes, price_no, spread, volume,
-                           hours_to_resolution, bucket_low, bucket_high}
-        """
-        city_slug = city_name.lower().replace(" ", "-")
-        markets = []
+        Order books are fetched in parallel for lower latency.
 
-        # Search Gamma API for events containing city name
+        Each result dict: {market_id, no_token_id, question, price_yes, price_no,
+                           spread, volume, hours_to_resolution, bucket_low, bucket_high}
+        """
         data = self._get(
             f"{POLYMARKET_GAMMA}/events",
             params={"q": city_name, "active": "true", "limit": 50},
         )
         if not data:
-            return markets
+            return []
 
         events = data if isinstance(data, list) else data.get("data", [])
+
+        # Collect candidate markets from all events (no HTTP yet)
+        candidates: list[dict] = []
         for event in events:
-            title = event.get("title", "")
-            if not self._is_weather_market(title):
+            if not self._is_weather_market(event.get("title", "")):
                 continue
             for market in event.get("markets", []):
-                question = market.get("question", "")
-                bucket = parse_temp_range(question)
-                if not bucket:
-                    continue
+                if parse_temp_range(market.get("question", "")):
+                    candidates.append(market)
 
-                # Fetch live order book for price
-                clob_token_ids = market.get("clobTokenIds", [""])
-                clob_token_id = clob_token_ids[0] if clob_token_ids else ""
-                no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else ""
-                ob = self._get(f"{POLYMARKET_BASE}/book", params={"token_id": clob_token_id})
-                if not ob:
-                    continue
+        if not candidates:
+            return []
 
+        # Fetch all order books in parallel
+        markets: list[dict] = []
+        max_workers = min(len(candidates), MAX_PARALLEL_ORDERBOOKS)
+        with ThreadPoolExecutor(max_workers=max_workers,
+                                thread_name_prefix="orderbook") as pool:
+            futures = {pool.submit(self._fetch_market_entry, m): m for m in candidates}
+            for future in as_completed(futures):
                 try:
-                    asks = ob.get("asks") or []
-                    bids = ob.get("bids") or []
-                    best_ask = float(asks[0].get("price", 1.0)) if asks else 1.0
-                    best_bid = float(bids[0].get("price", 0.0)) if bids else 0.0
-                    spread = best_ask - best_bid
-                    if spread < 0:
-                        logger.debug("Skipping market with negative spread: %s",
-                                     market.get("id", ""))
-                        continue
-                    mid = max(0.01, min(0.99, (best_ask + best_bid) / 2))
-                    volume = float(market.get("volume", 0))
-                    end_date = market.get("endDate", "")
-                    hours = self._hours_until_resolution(end_date)
-                except (ValueError, TypeError, IndexError) as exc:
-                    logger.debug("Order book parse failed for market %s: %s",
-                                 market.get("id", ""), exc)
-                    continue
-
-                # Validate bucket: low must be less than high
-                b_low, b_high = bucket[0], bucket[1]
-                if b_low != float("-inf") and b_high != float("inf") and b_low >= b_high:
-                    logger.debug("Invalid bucket %s–%s for market %s, swapping",
-                                 b_low, b_high, market.get("id", ""))
-                    b_low, b_high = b_high, b_low
-
-                markets.append({
-                    "market_id": clob_token_id,   # CLOB YES token ID for OrderArgs
-                    "no_token_id": no_token_id,    # CLOB NO token ID
-                    "question": question,
-                    "price_yes": mid,
-                    "price_no": 1 - mid,
-                    "spread": spread,
-                    "volume": volume,
-                    "hours_to_resolution": hours,
-                    "bucket_low": b_low,
-                    "bucket_high": b_high,
-                })
+                    result = future.result()
+                    if result:
+                        markets.append(result)
+                except Exception as exc:
+                    logger.debug("Market fetch error: %s", exc)
 
         logger.info("Found %d weather markets for %s", len(markets), city_name)
         return markets

@@ -11,10 +11,13 @@ all methods are safe no-ops (return None / False / 0.0).
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from trading.ev_calculator import TradeSignal
+
+from config import IOC_URGENCY_HOURS, ORDER_RETRY_MAX
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +113,38 @@ class PolymarketOrderExecutor:
 
     def place_order(self, signal: "TradeSignal") -> Optional[str]:
         """
-        Sign and submit a GTC limit order.
-        Returns the CLOB order_id on success, None on any failure.
+        Sign and submit a limit order with automatic retry and urgency-aware order type.
 
-        YES → BUY YES token at signal.market_price
-        NO  → BUY NO  token at signal.market_price (already the NO token price)
+        Order type selection:
+          hours_to_resolution < IOC_URGENCY_HOURS → IOC (fill immediately or cancel)
+          otherwise                                → GTC (Good-Till-Cancelled)
+
+        Retries up to ORDER_RETRY_MAX times with exponential backoff (1s, 2s, 4s).
+        Returns the CLOB order_id on success, None after all retries fail.
         """
         if not self.is_configured():
             return None
 
+        for attempt in range(ORDER_RETRY_MAX):
+            order_id = self._attempt_place_order(signal)
+            if order_id is not None:
+                return order_id
+            if attempt < ORDER_RETRY_MAX - 1:
+                delay = 2 ** attempt   # 1s → 2s → 4s
+                logger.info(
+                    "Order retry %d/%d for %s %s in %ds",
+                    attempt + 2, ORDER_RETRY_MAX, signal.direction, signal.city, delay,
+                )
+                time.sleep(delay)
+
+        logger.warning(
+            "Order failed after %d attempts: %s %s EV=%.3f",
+            ORDER_RETRY_MAX, signal.direction, signal.city, signal.ev,
+        )
+        return None
+
+    def _attempt_place_order(self, signal: "TradeSignal") -> Optional[str]:
+        """Single order submission attempt. Returns order_id or None."""
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.constants import BUY
@@ -128,7 +154,7 @@ class PolymarketOrderExecutor:
                 price = signal.market_price
             else:
                 token_id = signal.no_token_id
-                price = signal.market_price   # ev_calculator already flipped this to NO price
+                price = signal.market_price   # ev_calculator already flipped to NO price
 
             if not token_id:
                 logger.warning(
@@ -140,6 +166,12 @@ class PolymarketOrderExecutor:
             price = round(max(0.001, min(0.999, price)), 4)
             size = round(signal.recommended_usd, 2)
 
+            # Use IOC for urgent markets — fills immediately at best price or cancels.
+            # Use GTC for markets with time — waits for a matching counterparty.
+            order_type = (OrderType.IOC
+                          if signal.hours_to_resolution < IOC_URGENCY_HOURS
+                          else OrderType.GTC)
+
             order_args = OrderArgs(
                 token_id=token_id,
                 price=price,
@@ -147,7 +179,7 @@ class PolymarketOrderExecutor:
                 side=BUY,
             )
             signed_order = self._client.create_order(order_args)
-            response = self._client.post_order(signed_order, OrderType.GTC)
+            response = self._client.post_order(signed_order, order_type)
 
             order_id: Optional[str] = None
             if isinstance(response, dict):
@@ -157,8 +189,8 @@ class PolymarketOrderExecutor:
 
             if order_id:
                 logger.info(
-                    "LIVE ORDER: %s %s @ %.4f $%.2f → order_id=%s",
-                    signal.direction, signal.city, price, size, order_id,
+                    "LIVE ORDER [%s]: %s %s @ %.4f $%.2f → %s",
+                    order_type, signal.direction, signal.city, price, size, order_id,
                 )
             else:
                 logger.warning("Order posted but no order_id in response: %s", response)
@@ -167,7 +199,7 @@ class PolymarketOrderExecutor:
 
         except Exception as exc:
             logger.warning(
-                "place_order failed for %s %s: %s",
+                "place_order attempt failed for %s %s: %s",
                 signal.direction, signal.city, exc,
             )
             return None

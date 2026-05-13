@@ -22,8 +22,10 @@ from __future__ import annotations
 import argparse
 import datetime
 import logging
+import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from config import (
@@ -31,6 +33,7 @@ from config import (
     UPDATE_INTERVAL_SECONDS,
     SIM_ROUNDS,
     HIGH_SPREAD_THRESHOLD_F,
+    MAX_PARALLEL_CITIES,
     POLYMARKET_API_KEY,
     POLYMARKET_PRIVATE_KEY,
     POLYMARKET_PROXY_ADDRESS,
@@ -278,40 +281,33 @@ class MiroWeatherAgent:
         target_str: str,
         all_sims: list,
         actionable: list,
+        lock: threading.Lock,
     ) -> None:
-        """Process one city: fetch forecast, scan markets, simulate, trade."""
-        city_name = city_cfg["name"]
-        self._cycle_state["current_city"] = city_name
+        """
+        Process one city: fetch forecast, scan markets, simulate, evaluate.
 
+        Split into two phases to maximise parallel throughput:
+          Phase 1 — pure I/O + computation (no shared-state writes, runs in parallel)
+          Phase 2 — state writes (under lock, fast)
+        """
+        city_name = city_cfg["name"]
+        with lock:
+            self._cycle_state["current_city"] = city_name
+
+        # ── Phase 1: I/O + simulation (runs fully in parallel) ─────────────────
         forecast: CityForecast = fetch_city_forecast(city_cfg, target_date)
         if forecast.consensus_temp_f is None:
             logger.warning("No forecast data for %s, skipping", city_name)
             return
 
-        # Track forecast temp for TUI
-        if forecast.consensus_temp_f is not None:
-            self._cycle_state["last_forecast"][city_name] = forecast.consensus_temp_f
-
-        # Force low-confidence when models disagree too much
         high_disagreement = (forecast.model_spread_f or 0.0) > HIGH_SPREAD_THRESHOLD_F
-
         markets = self.scanner.get_open_markets(city_name)
-        self._cycle_state["last_markets"][city_name] = markets
-        for market in markets:
-            self.memory.record_observation(
-                city=city_name,
-                market_id=market["market_id"],
-                question=market.get("question", ""),
-                bucket_low=market["bucket_low"],
-                bucket_high=market["bucket_high"],
-                price_yes=market["price_yes"],
-                price_no=market["price_no"],
-                spread=market["spread"],
-                volume=market["volume"],
-                hours_to_resolution=market["hours_to_resolution"],
-            )
 
         simulated_buckets: set[tuple] = set()
+        city_sims: list = []
+        city_signals: list = []
+        city_sim_state: dict = {}
+        sim_market_pairs: list = []   # (sim, market) for record_prediction
 
         for market in markets:
             bucket_key = (market["bucket_low"], market["bucket_high"])
@@ -325,16 +321,15 @@ class MiroWeatherAgent:
                 bucket_high=market["bucket_high"],
                 target_date=target_str,
             )
-            # Override confidence if model spread is extreme
             if high_disagreement and sim.confidence_level != "low":
                 sim.confidence_level = "low"
-                logger.warning("%s: confidence overridden to 'low' due to high model spread", city_name)
+                logger.warning("%s: confidence overridden to 'low' (high model spread)", city_name)
 
-            all_sims.append(sim)
+            city_sims.append(sim)
+            sim_market_pairs.append((sim, market))
 
-            # Share scenario data with TUI
             if sim.used_scenario_mode:
-                self._cycle_state["last_sim_result"][city_name] = {
+                city_sim_state[city_name] = {
                     "scenarios": [
                         {"name": s.name, "probability": s.probability,
                          "expected_temp_f": s.expected_temp_f}
@@ -343,27 +338,6 @@ class MiroWeatherAgent:
                     "scenario_reasoning": sim.scenario_reasoning,
                     "used_scenario_mode": True,
                 }
-
-            self.memory.record_prediction(
-                city=city_name,
-                target_date=target_str,
-                bucket_low=market["bucket_low"],
-                bucket_high=market["bucket_high"],
-                consensus_probability=sim.consensus_probability,
-                confidence_level=sim.confidence_level,
-                model_spread_f=sim.model_spread_f,
-                agent_probabilities=[
-                    t.probability_estimate for t in sim.turns
-                    if t.round_num == SIM_ROUNDS and t.probability_estimate is not None
-                ],
-                market_price=market["price_yes"],
-                market_volume=market["volume"],
-                hours_to_resolution=market["hours_to_resolution"],
-                market_id=market["market_id"],
-                ecmwf_f=forecast.ecmwf.temp_f if forecast.ecmwf else None,
-                gfs_f=forecast.gfs.temp_f if forecast.gfs else None,
-                metar_f=forecast.metar.temp_f if forecast.metar else None,
-            )
 
             signal = self.ev_calc.evaluate(
                 sim=sim,
@@ -375,8 +349,7 @@ class MiroWeatherAgent:
                 no_token_id=market.get("no_token_id", ""),
             )
             if signal and signal.is_actionable:
-                actionable.append(signal)
-                self._cycle_state["last_signals"] = list(actionable)
+                city_signals.append(signal)
                 logger.info(
                     "Signal: %s %s %s EV=%.3f p=%.2f→%.2f $%.2f",
                     signal.direction, city_name, target_str,
@@ -397,7 +370,52 @@ class MiroWeatherAgent:
             )
             if high_disagreement:
                 sim.confidence_level = "low"
-            all_sims.append(sim)
+            city_sims.append(sim)
+
+        # ── Phase 2: All shared-state writes under lock (fast, no I/O) ────────
+        with lock:
+            self._cycle_state["last_forecast"][city_name] = forecast.consensus_temp_f
+            self._cycle_state["last_markets"][city_name] = markets
+            self._cycle_state["last_sim_result"].update(city_sim_state)
+            all_sims.extend(city_sims)
+            actionable.extend(city_signals)
+            self._cycle_state["last_signals"] = list(actionable)
+
+            for market in markets:
+                self.memory.record_observation(
+                    city=city_name,
+                    market_id=market["market_id"],
+                    question=market.get("question", ""),
+                    bucket_low=market["bucket_low"],
+                    bucket_high=market["bucket_high"],
+                    price_yes=market["price_yes"],
+                    price_no=market["price_no"],
+                    spread=market["spread"],
+                    volume=market["volume"],
+                    hours_to_resolution=market["hours_to_resolution"],
+                )
+
+            for sim, market in sim_market_pairs:
+                self.memory.record_prediction(
+                    city=city_name,
+                    target_date=target_str,
+                    bucket_low=market["bucket_low"],
+                    bucket_high=market["bucket_high"],
+                    consensus_probability=sim.consensus_probability,
+                    confidence_level=sim.confidence_level,
+                    model_spread_f=sim.model_spread_f,
+                    agent_probabilities=[
+                        t.probability_estimate for t in sim.turns
+                        if t.round_num == SIM_ROUNDS and t.probability_estimate is not None
+                    ],
+                    market_price=market["price_yes"],
+                    market_volume=market["volume"],
+                    hours_to_resolution=market["hours_to_resolution"],
+                    market_id=market["market_id"],
+                    ecmwf_f=forecast.ecmwf.temp_f if forecast.ecmwf else None,
+                    gfs_f=forecast.gfs.temp_f if forecast.gfs else None,
+                    metar_f=forecast.metar.temp_f if forecast.metar else None,
+                )
 
     def run_cycle(self, days_ahead: int = 1) -> list[TradeSignal]:
         """
@@ -427,11 +445,15 @@ class MiroWeatherAgent:
             self._run_learning_cycle(newly_resolved)
             self.memory.save()
 
-        # ── Step 1–7: Main analysis loop per city ─────────────────────────────
-        for city_cfg in CITIES:
+        # ── Step 1–7: Parallel city analysis ──────────────────────────────────
+        # All 20 cities run concurrently (bounded by MAX_PARALLEL_CITIES).
+        # Phase-1 work (HTTP + Claude API) is fully parallel; state writes are
+        # serialised under a lock in Phase 2 inside _process_city().
+        lock = threading.Lock()
+
+        def _run_city(city_cfg: dict) -> None:
             city_name = city_cfg["name"]
             logger.info("── Processing %s ──", city_name)
-
             try:
                 self._process_city(
                     city_cfg=city_cfg,
@@ -439,10 +461,40 @@ class MiroWeatherAgent:
                     target_str=target_str,
                     all_sims=all_sims,
                     actionable=actionable,
+                    lock=lock,
                 )
             except Exception as exc:
-                # One city failure must not crash the whole cycle
-                logger.error("City %s failed, skipping: %s", city_name, exc, exc_info=True)
+                logger.error("City %s failed: %s", city_name, exc, exc_info=True)
+
+        n_workers = min(len(CITIES), MAX_PARALLEL_CITIES)
+        cycle_start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=n_workers,
+                                thread_name_prefix="city") as pool:
+            futures = {pool.submit(_run_city, c): c["name"] for c in CITIES}
+            for future in as_completed(futures):
+                if future.exception():
+                    logger.error("City worker error: %s", future.exception())
+
+        logger.info(
+            "All %d cities processed in %.1fs (%d workers)",
+            len(CITIES), time.monotonic() - cycle_start, n_workers,
+        )
+
+        # Prioritise signals: high EV + low time-to-resolution first.
+        # Score = EV / log(hours+2) so 1-hour markets outrank 72-hour ones
+        # even at the same EV, favouring faster fills and tighter spreads.
+        actionable.sort(
+            key=lambda s: s.ev / math.log(max(1.0, s.hours_to_resolution) + 2),
+            reverse=True,
+        )
+        if actionable:
+            logger.info(
+                "Signals (priority-sorted): %s",
+                " | ".join(
+                    f"{s.direction} {s.city} EV={s.ev:.3f} {s.hours_to_resolution:.1f}h"
+                    for s in actionable[:5]
+                ),
+            )
 
         # ── Step 8: Execute actionable signals ───────────────────────────────
         for signal in actionable:

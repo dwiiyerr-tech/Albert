@@ -77,6 +77,16 @@ MAX_AGENTS_PER_SIM = 4       # weather analyst agents per city
 CONSENSUS_THRESHOLD = float(os.getenv("CONSENSUS_THRESHOLD", "0.65"))
 HIGH_SPREAD_THRESHOLD_F = float(os.getenv("HIGH_SPREAD_THRESHOLD_F", "8.0"))
 
+# ─── Execution / Parallelism ─────────────────────────────────────────────────
+# Max cities processed concurrently. Higher = faster cycle but more API load.
+MAX_PARALLEL_CITIES = int(os.getenv("MAX_PARALLEL_CITIES", "4"))
+# Max parallel order-book HTTP requests within a single city's market scan.
+MAX_PARALLEL_ORDERBOOKS = int(os.getenv("MAX_PARALLEL_ORDERBOOKS", "8"))
+# Hours-to-resolution threshold below which IOC orders are used instead of GTC.
+IOC_URGENCY_HOURS = float(os.getenv("IOC_URGENCY_HOURS", "6.0"))
+# Order submission retries (exponential backoff: 1s, 2s, 4s).
+ORDER_RETRY_MAX = int(os.getenv("ORDER_RETRY_MAX", "3"))
+
 # ─── Scenario Speculation ─────────────────────────────────────────────────────
 # When enabled, simulation uses a 3-phase protocol:
 #   Phase 1 — Morgan generates 2-3 explicit future weather scenarios
