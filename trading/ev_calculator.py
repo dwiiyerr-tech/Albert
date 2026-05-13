@@ -3,12 +3,16 @@ Expected Value & Kelly Criterion Calculator — from WeatherBot (alteregoeth-ai/
 
 Extended to accept simulation-derived probabilities instead of raw model output,
 giving the multi-agent consensus a direct path to trade sizing.
+
+Learning integration: the calibrator corrects raw simulation probabilities using
+historical Brier score data, and market_learner adjusts for discovered city/timing
+market inefficiencies before EV is computed.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from config import (
     KELLY_FRACTION,
@@ -21,6 +25,10 @@ from config import (
     CONSENSUS_THRESHOLD,
 )
 from simulation.agents import SimulationResult
+
+if TYPE_CHECKING:
+    from learning.calibration import ProbabilityCalibrator
+    from learning.market_learner import MarketPatternLearner
 
 
 @dataclass
@@ -61,7 +69,53 @@ class EVCalculator:
 
     Kelly fraction:
         f = (P × b − (1−P)) / b,  b = (1/price − 1)
+
+    Learning integration: pass calibrator and market_learner to automatically
+    correct raw probabilities before EV computation.
     """
+
+    def __init__(
+        self,
+        calibrator: Optional["ProbabilityCalibrator"] = None,
+        market_learner: Optional["MarketPatternLearner"] = None,
+    ) -> None:
+        self._calibrator = calibrator
+        self._market_learner = market_learner
+
+    def _adjust_probability(
+        self,
+        raw_p: float,
+        city: str,
+        hours_to_resolution: float,
+    ) -> tuple[float, list[str]]:
+        """
+        Apply learned corrections to a raw simulation probability.
+        Returns (adjusted_p, list_of_adjustments_applied).
+        """
+        p = raw_p
+        adjustments: list[str] = []
+
+        # 1. Calibration correction (Brier-score-based)
+        if self._calibrator:
+            calibrated = self._calibrator.calibrate(p, city)
+            if abs(calibrated - p) > 0.005:
+                adjustments.append(f"calibration {calibrated - p:+.3f}")
+            p = calibrated
+
+        # 2. City market bias correction
+        if self._market_learner:
+            city_adj = self._market_learner.ev_adjustment_for_city(city)
+            if abs(city_adj) > 0.005:
+                p = max(0.02, min(0.98, p - city_adj))
+                adjustments.append(f"city_bias {-city_adj:+.3f}")
+
+            # 3. Timing correction
+            timing_adj = self._market_learner.timing_adjustment(hours_to_resolution)
+            if abs(timing_adj) > 0.005:
+                p = max(0.02, min(0.98, p - timing_adj))
+                adjustments.append(f"timing {-timing_adj:+.3f}")
+
+        return p, adjustments
 
     def compute_ev(self, probability: float, price: float) -> float:
         """
@@ -94,6 +148,7 @@ class EVCalculator:
     ) -> Optional[TradeSignal]:
         """
         Generate a TradeSignal from a SimulationResult and live market data.
+        Applies learned probability corrections before computing EV.
         Returns None if the market doesn't meet basic filters.
         """
         # Basic market quality filters (from WeatherBot entry conditions)
@@ -104,7 +159,15 @@ class EVCalculator:
         if not (MIN_HOURS_TO_RESOLUTION <= hours_to_resolution <= MAX_HOURS_TO_RESOLUTION):
             return None
 
-        p_yes = sim.consensus_probability
+        # Apply learned probability corrections
+        raw_p = sim.consensus_probability
+        p_yes, adjustments = self._adjust_probability(raw_p, sim.city, hours_to_resolution)
+        if adjustments:
+            import logging
+            logging.getLogger(__name__).info(
+                "Probability adjusted %s: %.3f→%.3f (%s)",
+                sim.city, raw_p, p_yes, ", ".join(adjustments),
+            )
 
         # Try both YES and NO directions
         ev_yes = self.compute_ev(p_yes, market_price)
