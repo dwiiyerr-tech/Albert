@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import logging
+import threading
 import time
 
 from config import (
@@ -89,6 +90,15 @@ class MiroWeatherAgent:
         self.calibrator.fit()
 
         self._total_resolutions_processed = len(self.memory.resolved_records())
+
+        # TUI shared state — written by run_cycle(), read by dashboard
+        self._cycle_state: dict = {
+            "cycle_num": 0,
+            "current_city": "—",
+            "last_signals": [],
+            "last_markets": {},
+            "last_forecast": {},
+        }
 
     # ─── Learning pipeline ────────────────────────────────────────────────────
 
@@ -241,16 +251,22 @@ class MiroWeatherAgent:
     ) -> None:
         """Process one city: fetch forecast, scan markets, simulate, trade."""
         city_name = city_cfg["name"]
+        self._cycle_state["current_city"] = city_name
 
         forecast: CityForecast = fetch_city_forecast(city_cfg, target_date)
         if forecast.consensus_temp_f is None:
             logger.warning("No forecast data for %s, skipping", city_name)
             return
 
+        # Track forecast temp for TUI
+        if forecast.consensus_temp_f is not None:
+            self._cycle_state["last_forecast"][city_name] = forecast.consensus_temp_f
+
         # Force low-confidence when models disagree too much
         high_disagreement = (forecast.model_spread_f or 0.0) > HIGH_SPREAD_THRESHOLD_F
 
         markets = self.scanner.get_open_markets(city_name)
+        self._cycle_state["last_markets"][city_name] = markets
         for market in markets:
             self.memory.record_observation(
                 city=city_name,
@@ -317,6 +333,7 @@ class MiroWeatherAgent:
             )
             if signal and signal.is_actionable:
                 actionable.append(signal)
+                self._cycle_state["last_signals"] = list(actionable)
                 logger.info(
                     "Signal: %s %s %s EV=%.3f p=%.2f→%.2f $%.2f",
                     signal.direction, city_name, target_str,
@@ -348,6 +365,13 @@ class MiroWeatherAgent:
         target_str = target_date.isoformat()
         actionable: list[TradeSignal] = []
         all_sims: list[SimulationResult] = []
+
+        # Reset per-cycle TUI state
+        self._cycle_state["cycle_num"] = self._cycle_state.get("cycle_num", 0) + 1
+        self._cycle_state["last_signals"] = []
+        self._cycle_state["last_markets"] = {}
+        self._cycle_state["last_forecast"] = {}
+        self._cycle_state["current_city"] = "—"
 
         logger.info("═══ MiroWeather cycle: target=%s | lessons=%d | resolved=%d ═══",
                     target_str, len(self.memory.lessons),
@@ -466,6 +490,41 @@ class MiroWeatherAgent:
                 logger.error("Cycle error: %s", exc, exc_info=True)
             time.sleep(UPDATE_INTERVAL_SECONDS)
 
+    def run_with_tui(self, days_ahead: int = 1) -> None:
+        """
+        Start agent loop in a background thread, then run the rich TUI
+        in the main thread.  Press Ctrl+C to quit.
+        """
+        from tui import AlbertDashboard, TuiLogHandler
+
+        log_handler = TuiLogHandler()
+        # Attach to root logger so every module's output appears in TUI
+        root_logger = logging.getLogger()
+        root_logger.addHandler(log_handler)
+        # Suppress propagation to the plain console handler while TUI is active
+        for h in root_logger.handlers:
+            if h is not log_handler and isinstance(h, logging.StreamHandler):
+                h.setLevel(logging.CRITICAL)
+
+        def _loop() -> None:
+            while True:
+                try:
+                    signals = self.run_cycle(days_ahead=days_ahead)
+                    logger.info(
+                        "Cycle complete: %d signals | %d lessons | %d resolved",
+                        len(signals), len(self.memory.lessons),
+                        len(self.memory.resolved_records()),
+                    )
+                except Exception as exc:
+                    logger.error("Cycle error: %s", exc)
+                time.sleep(UPDATE_INTERVAL_SECONDS)
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+
+        dashboard = AlbertDashboard(self, log_handler)
+        dashboard.run()
+
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
@@ -487,6 +546,8 @@ def main() -> None:
                         help="Target days ahead for forecast (default: 1)")
     parser.add_argument("--live", action="store_true",
                         help="Execute real trades (default: dry run)")
+    parser.add_argument("--tui", action="store_true",
+                        help="Launch real-time terminal dashboard (Albert Miro Weather)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
@@ -495,7 +556,9 @@ def main() -> None:
 
     agent = MiroWeatherAgent(dry_run=not args.live)
 
-    if args.positions:
+    if args.tui:
+        agent.run_with_tui(days_ahead=args.days_ahead)
+    elif args.positions:
         agent.show_positions()
     elif args.learning_status:
         agent.show_learning_status()
