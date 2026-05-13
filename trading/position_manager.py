@@ -102,7 +102,13 @@ class PositionManager:
         bucket_high: float,
         target_date: str,
     ) -> Position:
-        stop = entry_price * (1 - STOP_LOSS_PCT)
+        # Fix: stop-loss direction depends on YES vs NO position.
+        # YES (long): stop below entry;  NO (short): stop above entry.
+        if direction == "YES":
+            stop = entry_price * (1 - STOP_LOSS_PCT)
+        else:
+            stop = entry_price * (1 + STOP_LOSS_PCT)
+
         pos = Position(
             market_id=market_id,
             city=city,
@@ -127,20 +133,34 @@ class PositionManager:
             return None
         pos.current_price = current_price
 
-        # Trailing stop activation
-        if not pos.trailing_active and pos.unrealized_pnl_pct >= TRAILING_STOP_TRIGGER:
+        # Trailing stop activation: profit direction depends on YES vs NO
+        if pos.direction == "YES":
+            profit_pct = (current_price - pos.entry_price) / pos.entry_price
+        else:  # NO: profit when price falls
+            profit_pct = (pos.entry_price - current_price) / pos.entry_price
+
+        if not pos.trailing_active and profit_pct >= TRAILING_STOP_TRIGGER:
             pos.trailing_active = True
             pos.stop_price = pos.entry_price  # move stop to breakeven
             logger.info("Trailing stop activated for %s %s", pos.city, market_id)
 
-        # Update trailing stop upward
+        # Update trailing stop in the favourable direction
         if pos.trailing_active:
-            new_stop = current_price * (1 - STOP_LOSS_PCT)
-            if new_stop > pos.stop_price:
-                pos.stop_price = new_stop
+            if pos.direction == "YES":
+                new_stop = current_price * (1 - STOP_LOSS_PCT)
+                if new_stop > pos.stop_price:
+                    pos.stop_price = new_stop
+            else:
+                new_stop = current_price * (1 + STOP_LOSS_PCT)
+                if new_stop < pos.stop_price:
+                    pos.stop_price = new_stop
 
         # Check stop-loss trigger
-        if current_price <= pos.stop_price:
+        triggered = (
+            (pos.direction == "YES" and current_price <= pos.stop_price)
+            or (pos.direction == "NO" and current_price >= pos.stop_price)
+        )
+        if triggered:
             return self._close(pos, "stop_loss")
 
         return None
@@ -154,7 +174,12 @@ class PositionManager:
     def _close(self, pos: Position, reason: str) -> Position:
         pos.closed = True
         pos.close_reason = reason
-        pnl_per_dollar = (pos.current_price - pos.entry_price) / pos.entry_price
+        # Fix: P&L sign depends on direction.
+        # YES profits when price rises; NO profits when price falls.
+        if pos.direction == "YES":
+            pnl_per_dollar = (pos.current_price - pos.entry_price) / pos.entry_price
+        else:
+            pnl_per_dollar = (pos.entry_price - pos.current_price) / pos.entry_price
         pos.pnl_usd = pos.size_usd * pnl_per_dollar
         del self.open_positions[pos.market_id]
         self.closed_positions.append(pos)

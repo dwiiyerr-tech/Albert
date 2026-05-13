@@ -184,14 +184,19 @@ class ExperienceMemory:
             logger.warning("Memory load failed: %s", exc)
 
     def save(self) -> None:
+        # Keep only most recent 1000 predictions to bound file size
+        all_preds = sorted(self.predictions.values(), key=lambda r: r.created_ts, reverse=True)
         payload = {
-            "predictions": [r.to_dict() for r in self.predictions.values()],
+            "predictions": [r.to_dict() for r in all_preds[:1000]],
             "observations": [o.to_dict() for o in self.observations[-2000:]],
             "lessons": [l.to_dict() for l in self.lessons],
         }
-        with open(self._file, "w") as f:
+        tmp_file = self._file + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        logger.debug("Memory saved")
+        os.replace(tmp_file, self._file)  # atomic write
+        logger.debug("Memory saved (%d predictions, %d observations, %d lessons)",
+                     len(all_preds[:1000]), len(self.observations), len(self.lessons))
 
     # ─── Write ────────────────────────────────────────────────────────────────
 
@@ -206,11 +211,55 @@ class ExperienceMemory:
         return obs
 
     def add_lesson(self, lesson: Lesson) -> None:
-        # Deduplicate by content similarity (simple: exact match)
         existing = [l for l in self.lessons if l.content.strip() == lesson.content.strip()]
         if not existing:
             self.lessons.append(lesson)
             logger.info("New lesson added [%s]: %s", lesson.category, lesson.content[:80])
+
+    def validate_lesson(self, lesson_id: str, confirmed: bool) -> None:
+        """
+        Increment times_validated or times_violated for a lesson based on
+        whether a new prediction outcome confirmed or violated it.
+        Also increments times_applied since the lesson was active at prediction time.
+        """
+        for lesson in self.lessons:
+            if lesson.id == lesson_id:
+                lesson.times_applied += 1
+                if confirmed:
+                    lesson.times_validated += 1
+                else:
+                    lesson.times_violated += 1
+                logger.debug(
+                    "Lesson %s updated: validated=%d violated=%d reliability=%.2f",
+                    lesson_id[:8], lesson.times_validated,
+                    lesson.times_violated, lesson.reliability_score,
+                )
+                return
+
+    def resolve_observations_for_city(
+        self,
+        city: str,
+        target_date: str,
+        actual_temp_f: float,
+        outcome_yes: bool,
+    ) -> int:
+        """
+        Mark all MarketObservations for a given city+date as resolved.
+        Returns count of observations updated.
+        """
+        updated = 0
+        for obs in self.observations:
+            if obs.city == city and obs.resolved_yes is None:
+                # Match by bucket: check if actual temp falls in the observation's bucket
+                lo, hi = obs.bucket_low, obs.bucket_high
+                obs_outcome = (
+                    (lo == float("-inf") or actual_temp_f >= lo)
+                    and (hi == float("inf") or actual_temp_f < hi)
+                )
+                obs.resolved_yes = obs_outcome
+                obs.actual_temp_f = actual_temp_f
+                updated += 1
+        return updated
 
     def resolve_prediction(
         self,

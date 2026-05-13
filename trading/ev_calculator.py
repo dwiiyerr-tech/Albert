@@ -90,31 +90,36 @@ class EVCalculator:
     ) -> tuple[float, list[str]]:
         """
         Apply learned corrections to a raw simulation probability.
+        Fix: corrections are summed first, then applied once with a ±0.20 cap
+        to prevent stacking from collapsing probabilities to extremes.
         Returns (adjusted_p, list_of_adjustments_applied).
         """
-        p = raw_p
+        total_delta = 0.0
         adjustments: list[str] = []
 
         # 1. Calibration correction (Brier-score-based)
         if self._calibrator:
-            calibrated = self._calibrator.calibrate(p, city)
-            if abs(calibrated - p) > 0.005:
-                adjustments.append(f"calibration {calibrated - p:+.3f}")
-            p = calibrated
+            calibrated = self._calibrator.calibrate(raw_p, city)
+            delta = calibrated - raw_p
+            if abs(delta) > 0.005:
+                total_delta += delta
+                adjustments.append(f"calibration {delta:+.3f}")
 
         # 2. City market bias correction
         if self._market_learner:
             city_adj = self._market_learner.ev_adjustment_for_city(city)
             if abs(city_adj) > 0.005:
-                p = max(0.02, min(0.98, p - city_adj))
+                total_delta -= city_adj
                 adjustments.append(f"city_bias {-city_adj:+.3f}")
 
-            # 3. Timing correction
             timing_adj = self._market_learner.timing_adjustment(hours_to_resolution)
             if abs(timing_adj) > 0.005:
-                p = max(0.02, min(0.98, p - timing_adj))
+                total_delta -= timing_adj
                 adjustments.append(f"timing {-timing_adj:+.3f}")
 
+        # Apply combined correction with a ±0.20 cap to prevent extremes
+        total_delta = max(-0.20, min(0.20, total_delta))
+        p = max(0.02, min(0.98, raw_p + total_delta))
         return p, adjustments
 
     def compute_ev(self, probability: float, price: float) -> float:
@@ -129,13 +134,16 @@ class EVCalculator:
         return ev
 
     def compute_kelly(self, probability: float, price: float) -> float:
-        """Return fractional Kelly stake (capped at KELLY_FRACTION)."""
+        """Return fractional Kelly stake (capped at KELLY_FRACTION).
+        Fix: was incorrectly applying `kelly * KELLY_FRACTION` then capping at
+        KELLY_FRACTION, which double-applied the fraction. Correct form: cap the
+        raw kelly at KELLY_FRACTION."""
         if price <= 0 or price >= 1:
             return 0.0
         b = (1.0 / price) - 1.0
         kelly = (probability * b - (1.0 - probability)) / b
         kelly = max(0.0, kelly)
-        return min(kelly * KELLY_FRACTION, KELLY_FRACTION)
+        return min(kelly, KELLY_FRACTION)  # cap at fractional Kelly limit
 
     def evaluate(
         self,

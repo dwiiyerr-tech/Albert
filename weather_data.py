@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -17,9 +18,35 @@ from config import (
     AVIATION_WEATHER_BASE,
     OPEN_METEO_BASE,
     VISUAL_CROSSING_API_KEY,
+    HIGH_SPREAD_THRESHOLD_F,
 )
 
 logger = logging.getLogger(__name__)
+
+OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
+
+
+def _retry_get(url: str, params: dict, retries: int = 3,
+               backoff: tuple = (2, 4, 8), timeout: int = 10) -> Optional[dict]:
+    """HTTP GET with exponential backoff retry."""
+    for attempt, wait in enumerate(backoff[:retries], start=1):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            if attempt <= retries:
+                logger.warning("HTTP attempt %d/%d failed for %s: %s — retrying in %ds",
+                               attempt, retries, url, exc, wait)
+                time.sleep(wait)
+            else:
+                logger.warning("HTTP request failed after %d retries: %s | %s", retries, url, exc)
+    return None
+
+
+# Keep old name as alias for backward compat
+def _safe_get(url: str, params: dict, timeout: int = 10) -> Optional[dict]:
+    return _retry_get(url, params, retries=3, timeout=timeout)
 
 
 @dataclass
@@ -142,41 +169,97 @@ def get_metar_observation(icao: str, city: str) -> Optional[TemperatureReading]:
         return None
     try:
         obs = data[0]
-        temp_c = float(obs.get("temp", obs.get("tmpf", None)))
+        # Try multiple field names used by different Aviation Weather API versions
+        raw = None
+        for field_name in ("temp", "tmpf", "tempC", "tempF", "temperature"):
+            raw = obs.get(field_name)
+            if raw is not None:
+                break
+        if raw is None:
+            logger.warning("METAR %s: no temperature field found in %s", icao, list(obs.keys()))
+            return None
+        temp_c = float(raw)
+        # If the value looks like Fahrenheit (> 60 in summer) and field was tmpf, convert
+        if "f" in (field_name or "").lower() and temp_c > 50:
+            temp_c = (temp_c - 32) * 5 / 9
         today = datetime.date.today()
         return TemperatureReading(source="METAR", city=city, date=today,
                                   temp_c=temp_c, confidence=0.95)
-    except (TypeError, ValueError, KeyError):
+    except (TypeError, ValueError, KeyError) as exc:
+        logger.warning("METAR parse failed for %s: %s", icao, exc)
         return None
 
 
-def get_historical_temp(city: str, date: datetime.date) -> Optional[TemperatureReading]:
-    """Fetch historical actuals from Visual Crossing (requires API key)."""
-    if not VISUAL_CROSSING_API_KEY:
-        return None
-    url = (
-        f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services"
-        f"/timeline/{city}/{date.isoformat()}"
-    )
+def get_historical_temp_openmeteo(lat: float, lon: float, city: str,
+                                   date: datetime.date) -> Optional[TemperatureReading]:
+    """
+    Fetch historical temperature from Open-Meteo archive API.
+    Free, no API key required. Used as primary fallback for prediction resolution.
+    """
     params = {
-        "unitGroup": "metric",
-        "key": VISUAL_CROSSING_API_KEY,
-        "include": "days",
-        "elements": "tempmax",
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": date.isoformat(),
+        "end_date": date.isoformat(),
+        "daily": "temperature_2m_max",
+        "temperature_unit": "celsius",
+        "timezone": "auto",
     }
-    data = _safe_get(url, params)
+    data = _safe_get(OPEN_METEO_ARCHIVE, params)
     if not data:
         return None
     try:
-        temp_c = data["days"][0]["tempmax"]
-        return TemperatureReading(source="VisualCrossing", city=city, date=date,
-                                  temp_c=temp_c, confidence=1.0)
-    except (KeyError, IndexError):
+        temp_c = data["daily"]["temperature_2m_max"][0]
+        if temp_c is None:
+            return None
+        return TemperatureReading(source="OpenMeteoArchive", city=city, date=date,
+                                  temp_c=temp_c, confidence=0.98)
+    except (KeyError, IndexError, TypeError):
         return None
 
 
+def get_historical_temp(city: str, date: datetime.date,
+                         lat: Optional[float] = None,
+                         lon: Optional[float] = None) -> Optional[TemperatureReading]:
+    """
+    Fetch historical actuals.
+    Tries Visual Crossing first (if API key set), then falls back to
+    Open-Meteo archive (free, no key needed) using lat/lon.
+    """
+    # Primary: Visual Crossing
+    if VISUAL_CROSSING_API_KEY:
+        url = (
+            f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services"
+            f"/timeline/{city}/{date.isoformat()}"
+        )
+        params = {
+            "unitGroup": "metric",
+            "key": VISUAL_CROSSING_API_KEY,
+            "include": "days",
+            "elements": "tempmax",
+        }
+        data = _safe_get(url, params)
+        if data:
+            try:
+                temp_c = data["days"][0]["tempmax"]
+                return TemperatureReading(source="VisualCrossing", city=city, date=date,
+                                          temp_c=temp_c, confidence=1.0)
+            except (KeyError, IndexError):
+                pass
+
+    # Fallback: Open-Meteo archive (free, no key)
+    if lat is not None and lon is not None:
+        return get_historical_temp_openmeteo(lat, lon, city, date)
+
+    logger.warning("Cannot resolve historical temp for %s %s: no API key and no lat/lon", city, date)
+    return None
+
+
 def fetch_city_forecast(city_cfg: dict, target_date: datetime.date) -> CityForecast:
-    """Aggregate all model forecasts for a city on a given date."""
+    """
+    Aggregate all model forecasts for a city on a given date.
+    Sets confidence to 'low' automatically when model spread exceeds HIGH_SPREAD_THRESHOLD_F.
+    """
     name = city_cfg["name"]
     lat, lon = city_cfg["lat"], city_cfg["lon"]
     metar_id = city_cfg.get("metar")
@@ -187,12 +270,20 @@ def fetch_city_forecast(city_cfg: dict, target_date: datetime.date) -> CityForec
     if metar_id and target_date == datetime.date.today():
         forecast.metar = get_metar_observation(metar_id, name)
 
+    spread = forecast.model_spread_f or 0.0
+    if spread > HIGH_SPREAD_THRESHOLD_F:
+        logger.warning(
+            "High model disagreement for %s %s: spread=%.1f°F > threshold=%.1f°F — "
+            "simulation will be flagged low-confidence",
+            name, target_date, spread, HIGH_SPREAD_THRESHOLD_F,
+        )
+
     logger.info(
-        "Forecast %s %s → consensus=%.1f°F spread=%.1f°F",
-        name,
-        target_date,
+        "Forecast %s %s → consensus=%.1f°F spread=%.1f°F%s",
+        name, target_date,
         forecast.consensus_temp_f or 0,
-        forecast.model_spread_f or 0,
+        spread,
+        " [HIGH DISAGREEMENT]" if spread > HIGH_SPREAD_THRESHOLD_F else "",
     )
     return forecast
 

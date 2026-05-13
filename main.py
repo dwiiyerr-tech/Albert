@@ -28,6 +28,7 @@ from config import (
     CITIES,
     UPDATE_INTERVAL_SECONDS,
     SIM_ROUNDS,
+    HIGH_SPREAD_THRESHOLD_F,
 )
 from utils import setup_logging
 from weather_data import fetch_city_forecast, CityForecast, get_historical_temp
@@ -40,6 +41,9 @@ from learning import (
     ProbabilityCalibrator,
     MarketPatternLearner,
 )
+
+# City lookup: name → config dict (for lat/lon in historical temp)
+_CITY_BY_NAME: dict[str, dict] = {c["name"]: c for c in CITIES}
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +95,16 @@ class MiroWeatherAgent:
     def _resolve_pending_predictions(self) -> int:
         """
         Check unresolved PredictionRecords and attempt to resolve them
-        using historical temperature data. Returns count of newly resolved.
+        using historical temperature data.
+
+        Fixes applied:
+        - Passes lat/lon to get_historical_temp() so Open-Meteo archive
+          fallback works without a VisualCrossing API key.
+        - Updates MarketObservation.resolved_yes so MarketPatternLearner
+          has data to work with.
+        - Calls validate_lesson() to close the lesson feedback loop.
+        - Per-record try-except so one failure doesn't lose all progress.
+        Returns count of newly resolved predictions.
         """
         unresolved = self.memory.unresolved_records()
         newly_resolved = 0
@@ -105,7 +118,17 @@ class MiroWeatherAgent:
             if target >= today:
                 continue  # not yet passed
 
-            actual = get_historical_temp(rec.city, target)
+            # Look up lat/lon for the city (needed for Open-Meteo archive fallback)
+            city_cfg = _CITY_BY_NAME.get(rec.city, {})
+            lat = city_cfg.get("lat")
+            lon = city_cfg.get("lon")
+
+            try:
+                actual = get_historical_temp(rec.city, target, lat=lat, lon=lon)
+            except Exception as exc:
+                logger.warning("Historical temp lookup failed for %s %s: %s",
+                               rec.city, target, exc)
+                continue
             if actual is None:
                 continue
 
@@ -124,16 +147,35 @@ class MiroWeatherAgent:
                 if pos:
                     pnl = pos.pnl_usd
 
-            self.memory.resolve_prediction(
-                rec.id, temp_f, outcome_yes, pnl_usd=pnl
-            )
+            self.memory.resolve_prediction(rec.id, temp_f, outcome_yes, pnl_usd=pnl)
 
-            # Immediate post-trade reflection
+            # ── FIX: Update MarketObservations so MarketPatternLearner works ──
+            obs_updated = self.memory.resolve_observations_for_city(
+                rec.city, rec.target_date, temp_f, outcome_yes
+            )
+            if obs_updated:
+                logger.debug("Updated %d observations for %s %s",
+                             obs_updated, rec.city, rec.target_date)
+
+            # ── FIX: Close the lesson feedback loop ───────────────────────────
+            # Determine if the prediction was directionally correct
+            # (predicted prob > 0.5 and outcome_yes, or < 0.5 and not outcome_yes)
+            was_correct = (rec.consensus_probability > 0.5) == outcome_yes
+            # Validate/violate lessons that are relevant to this city
+            relevant_lessons = self.memory.lessons_for_city(rec.city, top_n=20)
+            for lesson in relevant_lessons:
+                # Only update lessons that predate this prediction (were active when it was made)
+                if lesson.created_ts <= rec.created_ts:
+                    self.memory.validate_lesson(lesson.id, confirmed=was_correct)
+
+            # Immediate post-trade reflection (only when we've built up 3+ resolutions)
             rec_updated = self.memory.predictions[rec.id]
-            new_lessons = self.reflection.post_trade_reflection(rec_updated)
-            if new_lessons:
-                logger.info("Post-trade reflection: %d new lessons from %s %s",
-                            len(new_lessons), rec.city, rec.target_date)
+            city_resolved_count = len(self.memory.resolved_records(city=rec.city, last_n=200))
+            if city_resolved_count >= 3:
+                new_lessons = self.reflection.post_trade_reflection(rec_updated)
+                if new_lessons:
+                    logger.info("Post-trade reflection: %d new lessons from %s %s",
+                                len(new_lessons), rec.city, rec.target_date)
 
             newly_resolved += 1
 
@@ -189,6 +231,114 @@ class MiroWeatherAgent:
 
     # ─── Core pipeline ────────────────────────────────────────────────────────
 
+    def _process_city(
+        self,
+        city_cfg: dict,
+        target_date: datetime.date,
+        target_str: str,
+        all_sims: list,
+        actionable: list,
+    ) -> None:
+        """Process one city: fetch forecast, scan markets, simulate, trade."""
+        city_name = city_cfg["name"]
+
+        forecast: CityForecast = fetch_city_forecast(city_cfg, target_date)
+        if forecast.consensus_temp_f is None:
+            logger.warning("No forecast data for %s, skipping", city_name)
+            return
+
+        # Force low-confidence when models disagree too much
+        high_disagreement = (forecast.model_spread_f or 0.0) > HIGH_SPREAD_THRESHOLD_F
+
+        markets = self.scanner.get_open_markets(city_name)
+        for market in markets:
+            self.memory.record_observation(
+                city=city_name,
+                market_id=market["market_id"],
+                question=market.get("question", ""),
+                bucket_low=market["bucket_low"],
+                bucket_high=market["bucket_high"],
+                price_yes=market["price_yes"],
+                price_no=market["price_no"],
+                spread=market["spread"],
+                volume=market["volume"],
+                hours_to_resolution=market["hours_to_resolution"],
+            )
+
+        simulated_buckets: set[tuple] = set()
+
+        for market in markets:
+            bucket_key = (market["bucket_low"], market["bucket_high"])
+            if bucket_key in simulated_buckets:
+                continue
+            simulated_buckets.add(bucket_key)
+
+            sim = self.simulator.run(
+                forecast=forecast,
+                bucket_low=market["bucket_low"],
+                bucket_high=market["bucket_high"],
+                target_date=target_str,
+            )
+            # Override confidence if model spread is extreme
+            if high_disagreement and sim.confidence_level != "low":
+                sim.confidence_level = "low"
+                logger.warning("%s: confidence overridden to 'low' due to high model spread", city_name)
+
+            all_sims.append(sim)
+
+            self.memory.record_prediction(
+                city=city_name,
+                target_date=target_str,
+                bucket_low=market["bucket_low"],
+                bucket_high=market["bucket_high"],
+                consensus_probability=sim.consensus_probability,
+                confidence_level=sim.confidence_level,
+                model_spread_f=sim.model_spread_f,
+                agent_probabilities=[
+                    t.probability_estimate for t in sim.turns
+                    if t.round_num == SIM_ROUNDS and t.probability_estimate is not None
+                ],
+                market_price=market["price_yes"],
+                market_volume=market["volume"],
+                hours_to_resolution=market["hours_to_resolution"],
+                market_id=market["market_id"],
+                ecmwf_f=forecast.ecmwf.temp_f if forecast.ecmwf else None,
+                gfs_f=forecast.gfs.temp_f if forecast.gfs else None,
+                metar_f=forecast.metar.temp_f if forecast.metar else None,
+            )
+
+            signal = self.ev_calc.evaluate(
+                sim=sim,
+                market_price=market["price_yes"],
+                market_id=market["market_id"],
+                hours_to_resolution=market["hours_to_resolution"],
+                volume=market["volume"],
+                spread=market["spread"],
+            )
+            if signal and signal.is_actionable:
+                actionable.append(signal)
+                logger.info(
+                    "Signal: %s %s %s EV=%.3f p=%.2f→%.2f $%.2f",
+                    signal.direction, city_name, target_str,
+                    signal.ev, sim.consensus_probability,
+                    signal.probability, signal.recommended_usd,
+                )
+
+        # Fallback simulation when no markets found
+        if not markets and forecast.consensus_temp_f is not None:
+            temp = forecast.consensus_temp_f
+            bucket_low = round(temp / 5) * 5 - 5
+            bucket_high = bucket_low + 10
+            sim = self.simulator.run(
+                forecast=forecast,
+                bucket_low=bucket_low,
+                bucket_high=bucket_high,
+                target_date=target_str,
+            )
+            if high_disagreement:
+                sim.confidence_level = "low"
+            all_sims.append(sim)
+
     def run_cycle(self, days_ahead: int = 1) -> list[TradeSignal]:
         """
         Run one full analysis + learning cycle.
@@ -214,97 +364,17 @@ class MiroWeatherAgent:
             city_name = city_cfg["name"]
             logger.info("── Processing %s ──", city_name)
 
-            # Fetch weather data
-            forecast: CityForecast = fetch_city_forecast(city_cfg, target_date)
-            if forecast.consensus_temp_f is None:
-                logger.warning("No forecast data for %s, skipping", city_name)
-                continue
-
-            # Scan Polymarket + record observations
-            markets = self.scanner.get_open_markets(city_name)
-            for market in markets:
-                self.memory.record_observation(
-                    city=city_name,
-                    market_id=market["market_id"],
-                    question=market.get("question", ""),
-                    bucket_low=market["bucket_low"],
-                    bucket_high=market["bucket_high"],
-                    price_yes=market["price_yes"],
-                    price_no=market["price_no"],
-                    spread=market["spread"],
-                    volume=market["volume"],
-                    hours_to_resolution=market["hours_to_resolution"],
+            try:
+                self._process_city(
+                    city_cfg=city_cfg,
+                    target_date=target_date,
+                    target_str=target_str,
+                    all_sims=all_sims,
+                    actionable=actionable,
                 )
-
-            simulated_buckets: set[tuple] = set()
-
-            for market in markets:
-                bucket_key = (market["bucket_low"], market["bucket_high"])
-                if bucket_key in simulated_buckets:
-                    continue
-                simulated_buckets.add(bucket_key)
-
-                # Run multi-agent simulation (with learned lessons injected)
-                sim = self.simulator.run(
-                    forecast=forecast,
-                    bucket_low=market["bucket_low"],
-                    bucket_high=market["bucket_high"],
-                    target_date=target_str,
-                )
-                all_sims.append(sim)
-
-                # Record prediction in memory
-                self.memory.record_prediction(
-                    city=city_name,
-                    target_date=target_str,
-                    bucket_low=market["bucket_low"],
-                    bucket_high=market["bucket_high"],
-                    consensus_probability=sim.consensus_probability,
-                    confidence_level=sim.confidence_level,
-                    model_spread_f=sim.model_spread_f,
-                    agent_probabilities=[
-                        t.probability_estimate for t in sim.turns
-                        if t.round_num == SIM_ROUNDS and t.probability_estimate is not None
-                    ],
-                    market_price=market["price_yes"],
-                    market_volume=market["volume"],
-                    hours_to_resolution=market["hours_to_resolution"],
-                    market_id=market["market_id"],
-                    ecmwf_f=forecast.ecmwf.temp_f if forecast.ecmwf else None,
-                    gfs_f=forecast.gfs.temp_f if forecast.gfs else None,
-                    metar_f=forecast.metar.temp_f if forecast.metar else None,
-                )
-
-                # Evaluate trade signal (calibrated + market-bias-adjusted)
-                signal = self.ev_calc.evaluate(
-                    sim=sim,
-                    market_price=market["price_yes"],
-                    market_id=market["market_id"],
-                    hours_to_resolution=market["hours_to_resolution"],
-                    volume=market["volume"],
-                    spread=market["spread"],
-                )
-                if signal and signal.is_actionable:
-                    actionable.append(signal)
-                    logger.info(
-                        "Signal: %s %s %s EV=%.3f p=%.2f→%.2f $%.2f",
-                        signal.direction, city_name, target_str,
-                        signal.ev, sim.consensus_probability,
-                        signal.probability, signal.recommended_usd,
-                    )
-
-            # Fallback simulation when no markets found
-            if not markets and forecast.consensus_temp_f is not None:
-                temp = forecast.consensus_temp_f
-                bucket_low = round(temp / 5) * 5 - 5
-                bucket_high = bucket_low + 10
-                sim = self.simulator.run(
-                    forecast=forecast,
-                    bucket_low=bucket_low,
-                    bucket_high=bucket_high,
-                    target_date=target_str,
-                )
-                all_sims.append(sim)
+            except Exception as exc:
+                # One city failure must not crash the whole cycle
+                logger.error("City %s failed, skipping: %s", city_name, exc, exc_info=True)
 
         # ── Step 8: Execute actionable signals ───────────────────────────────
         for signal in actionable:

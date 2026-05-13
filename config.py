@@ -3,14 +3,28 @@ MiroWeather Configuration
 Combined configuration for weather simulation + prediction trading agent.
 """
 import os
+import sys
+
+
+def _require_env(name: str) -> str:
+    """Return env var value or exit with a clear message if missing."""
+    val = os.getenv(name, "")
+    if not val:
+        print(f"ERROR: required environment variable {name!r} is not set. "
+              f"Set it before running MiroWeather.", file=sys.stderr)
+        sys.exit(1)
+    return val
+
 
 # ─── LLM / Claude API ────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = "claude-sonnet-4-6"
+# Validated at import time: agent cannot start without this key.
+ANTHROPIC_API_KEY = _require_env("ANTHROPIC_API_KEY")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 # ─── Weather Data Sources ─────────────────────────────────────────────────────
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 AVIATION_WEATHER_BASE = "https://aviationweather.gov/api/data"
+# Optional — agent falls back to Open-Meteo archive if not set
 VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY", "")
 
 # ─── Polymarket ───────────────────────────────────────────────────────────────
@@ -33,6 +47,7 @@ TRAILING_STOP_TRIGGER = 0.20 # activate trailing stop after 20% profit
 SIM_ROUNDS = 3               # debate rounds per city simulation
 MAX_AGENTS_PER_SIM = 4       # weather analyst agents per city
 CONSENSUS_THRESHOLD = 0.65   # probability threshold for high-confidence signal
+HIGH_SPREAD_THRESHOLD_F = 8.0  # model disagreement above this → force low-confidence
 
 # ─── Monitored Cities ────────────────────────────────────────────────────────
 CITIES = [

@@ -24,12 +24,23 @@ logger = logging.getLogger(__name__)
 MIN_SAMPLES_GLOBAL = 20
 MIN_SAMPLES_CITY = 10
 
-# Probability bins for calibration (0.05 width)
-BIN_EDGES = [i / 20 for i in range(21)]  # 0.00, 0.05, ..., 1.00
+# Use wider bins (0.10) when data is sparse, narrow (0.05) once we have ≥100 global samples.
+# Wider bins fill faster and reduce noise from sparse data.
+_WIDE_BIN_EDGES = [i / 10 for i in range(11)]   # 0.0, 0.1, ..., 1.0  (10 bins)
+_NARROW_BIN_EDGES = [i / 20 for i in range(21)] # 0.0, 0.05, ..., 1.0 (20 bins)
+NARROW_BIN_THRESHOLD = 100  # switch to narrow bins after this many global samples
+
+BIN_EDGES = _NARROW_BIN_EDGES  # kept for external reference; actual edges chosen dynamically
 
 
-def _bin_index(p: float) -> int:
-    return min(int(p * 20), 19)
+def _choose_edges(n_global: int) -> list[float]:
+    return _NARROW_BIN_EDGES if n_global >= NARROW_BIN_THRESHOLD else _WIDE_BIN_EDGES
+
+
+def _bin_index(p: float, edges: list[float]) -> int:
+    n_bins = len(edges) - 1
+    step = edges[1] - edges[0]
+    return min(int(p / step), n_bins - 1)
 
 
 class CalibrationBin:
@@ -77,51 +88,52 @@ class ProbabilityCalibrator:
 
     def __init__(self, memory: ExperienceMemory) -> None:
         self._memory = memory
-        # global_bins[bin_idx] = CalibrationBin
-        self._global_bins: list[CalibrationBin] = [
-            CalibrationBin(BIN_EDGES[i], BIN_EDGES[i + 1])
-            for i in range(len(BIN_EDGES) - 1)
-        ]
-        # city_bins[city][bin_idx] = CalibrationBin
+        self._global_bins: list[CalibrationBin] = []
         self._city_bins: dict[str, list[CalibrationBin]] = {}
+        self._active_edges: list[float] = _WIDE_BIN_EDGES
         self._fitted = False
+
+    def _make_bins(self, edges: list[float]) -> list[CalibrationBin]:
+        return [CalibrationBin(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
 
     # ─── Fitting ──────────────────────────────────────────────────────────────
 
     def fit(self) -> None:
-        """Refit calibration bins from all resolved predictions in memory."""
+        """
+        Refit calibration bins from all resolved predictions in memory.
+        Uses wider bins when data is sparse (< 100 global samples) to ensure
+        bins are populated enough to give meaningful corrections.
+        """
         resolved = self._memory.resolved_records(last_n=500)
-        if not resolved:
+        valid = [r for r in resolved if r.outcome_yes is not None]
+        if not valid:
+            logger.debug("Calibrator: no resolved predictions yet, skipping fit")
             return
 
-        # Reset bins
-        self._global_bins = [
-            CalibrationBin(BIN_EDGES[i], BIN_EDGES[i + 1])
-            for i in range(len(BIN_EDGES) - 1)
-        ]
+        # Choose bin width based on data volume
+        edges = _choose_edges(len(valid))
+        self._active_edges = edges
+
+        self._global_bins = self._make_bins(edges)
         self._city_bins = {}
 
-        for rec in resolved:
-            if rec.outcome_yes is None:
-                continue
+        for rec in valid:
             p = rec.consensus_probability
             actual = 1.0 if rec.outcome_yes else 0.0
-            idx = _bin_index(p)
+            idx = _bin_index(p, edges)
 
             self._global_bins[idx].add(p, actual)
 
             city = rec.city
             if city not in self._city_bins:
-                self._city_bins[city] = [
-                    CalibrationBin(BIN_EDGES[i], BIN_EDGES[i + 1])
-                    for i in range(len(BIN_EDGES) - 1)
-                ]
+                self._city_bins[city] = self._make_bins(edges)
             self._city_bins[city][idx].add(p, actual)
 
         self._fitted = True
+        bin_width = edges[1] - edges[0]
         logger.info(
-            "Calibrator fitted on %d resolved predictions across %d cities",
-            len(resolved), len(self._city_bins),
+            "Calibrator fitted: %d predictions, %d cities, bin_width=%.2f",
+            len(valid), len(self._city_bins), bin_width,
         )
 
     # ─── Calibration ──────────────────────────────────────────────────────────
@@ -134,7 +146,11 @@ class ProbabilityCalibrator:
         if not self._fitted:
             self.fit()
 
-        idx = _bin_index(raw_p)
+        if not self._global_bins:
+            return raw_p  # no data at all yet
+
+        edges = self._active_edges
+        idx = _bin_index(raw_p, edges)
 
         # Try city-specific first
         if city and city in self._city_bins:
@@ -142,8 +158,7 @@ class ProbabilityCalibrator:
             city_global_count = sum(b.count for b in self._city_bins[city])
             if city_global_count >= MIN_SAMPLES_CITY and city_bin.count >= 2:
                 correction = city_bin.calibration_error or 0.0
-                calibrated = raw_p - correction
-                calibrated = max(0.02, min(0.98, calibrated))
+                calibrated = max(0.02, min(0.98, raw_p - correction))
                 logger.debug(
                     "City calibration %s: raw=%.3f correction=%+.3f → %.3f",
                     city, raw_p, correction, calibrated,
@@ -156,15 +171,16 @@ class ProbabilityCalibrator:
             global_bin = self._global_bins[idx]
             if global_bin.count >= 2:
                 correction = global_bin.calibration_error or 0.0
-                calibrated = raw_p - correction
-                calibrated = max(0.02, min(0.98, calibrated))
+                calibrated = max(0.02, min(0.98, raw_p - correction))
                 logger.debug(
                     "Global calibration: raw=%.3f correction=%+.3f → %.3f",
                     raw_p, correction, calibrated,
                 )
                 return calibrated
 
-        # Not enough data yet — return raw
+        # Not enough data yet — return raw (log only once per session)
+        logger.debug("Calibration: insufficient data (n=%d), returning raw p=%.3f",
+                     global_count, raw_p)
         return raw_p
 
     # ─── Diagnostics ──────────────────────────────────────────────────────────

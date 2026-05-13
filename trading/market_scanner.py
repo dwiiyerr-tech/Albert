@@ -83,15 +83,30 @@ class MarketScanner:
                     continue
 
                 try:
-                    best_ask = float(ob.get("asks", [{}])[0].get("price", 1.0))
-                    best_bid = float(ob.get("bids", [{}])[0].get("price", 0.0))
+                    asks = ob.get("asks") or []
+                    bids = ob.get("bids") or []
+                    best_ask = float(asks[0].get("price", 1.0)) if asks else 1.0
+                    best_bid = float(bids[0].get("price", 0.0)) if bids else 0.0
                     spread = best_ask - best_bid
-                    mid = (best_ask + best_bid) / 2
+                    if spread < 0:
+                        logger.debug("Skipping market with negative spread: %s",
+                                     market.get("id", ""))
+                        continue
+                    mid = max(0.01, min(0.99, (best_ask + best_bid) / 2))
                     volume = float(market.get("volume", 0))
                     end_date = market.get("endDate", "")
                     hours = self._hours_until_resolution(end_date)
-                except (ValueError, TypeError, IndexError):
+                except (ValueError, TypeError, IndexError) as exc:
+                    logger.debug("Order book parse failed for market %s: %s",
+                                 market.get("id", ""), exc)
                     continue
+
+                # Validate bucket: low must be less than high
+                b_low, b_high = bucket[0], bucket[1]
+                if b_low != float("-inf") and b_high != float("inf") and b_low >= b_high:
+                    logger.debug("Invalid bucket %s–%s for market %s, swapping",
+                                 b_low, b_high, market.get("id", ""))
+                    b_low, b_high = b_high, b_low
 
                 markets.append({
                     "market_id": market.get("id", ""),
@@ -101,8 +116,8 @@ class MarketScanner:
                     "spread": spread,
                     "volume": volume,
                     "hours_to_resolution": hours,
-                    "bucket_low": bucket[0],
-                    "bucket_high": bucket[1],
+                    "bucket_low": b_low,
+                    "bucket_high": b_high,
                 })
 
         logger.info("Found %d weather markets for %s", len(markets), city_name)

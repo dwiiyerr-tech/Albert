@@ -349,24 +349,42 @@ Be specific: "When [condition], reduce probability estimate by [amount]" rather 
 
             messages.append({"role": "assistant", "content": response.content})
 
-            if response.stop_reason == "end_turn":
+            if response.stop_reason in ("end_turn", "max_tokens"):
+                # max_tokens: Claude hit token limit — extract any tool calls already in response
+                if response.stop_reason == "max_tokens":
+                    logger.warning("Reflection hit max_tokens — extracting partial tool results")
+                    for block in response.content:
+                        if hasattr(block, "type") and block.type == "tool_use":
+                            try:
+                                _, new_lessons = self._dispatch_tool(
+                                    block.name, block.input, record_ids
+                                )
+                                all_lessons.extend(new_lessons)
+                            except Exception as exc:
+                                logger.warning("Partial tool dispatch failed: %s", exc)
                 break
 
             if response.stop_reason == "tool_use":
                 tool_results = []
                 for block in response.content:
-                    if block.type == "tool_use":
-                        result_str, new_lessons = self._dispatch_tool(
-                            block.name, block.input, record_ids
-                        )
-                        all_lessons.extend(new_lessons)
+                    if hasattr(block, "type") and block.type == "tool_use":
+                        try:
+                            result_str, new_lessons = self._dispatch_tool(
+                                block.name, block.input, record_ids
+                            )
+                            all_lessons.extend(new_lessons)
+                        except Exception as exc:
+                            logger.warning("Tool dispatch error (%s): %s", block.name, exc)
+                            result_str = json.dumps({"error": str(exc)})
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
                             "content": result_str,
                         })
-                messages.append({"role": "user", "content": tool_results})
+                if tool_results:
+                    messages.append({"role": "user", "content": tool_results})
             else:
+                logger.debug("Reflection loop ended with stop_reason=%s", response.stop_reason)
                 break
 
         return all_lessons

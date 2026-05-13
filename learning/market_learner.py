@@ -34,7 +34,23 @@ class MarketEdge:
 
     @property
     def is_significant(self) -> bool:
-        return self.sample_size >= 5 and abs(self.mean_edge) > 0.05 and self.hit_rate > 0.55
+        # Require at least 10 samples for basic significance
+        return self.sample_size >= 10 and abs(self.mean_edge) > 0.05 and self.hit_rate > 0.55
+
+    @property
+    def statistical_confidence(self) -> float:
+        """
+        Approximate 95% confidence lower bound on hit_rate using Wilson score interval.
+        More statistically grounded than ad-hoc formula.
+        """
+        if self.sample_size < 2:
+            return 0.0
+        n = self.sample_size
+        p = self.hit_rate
+        z = 1.96  # 95% CI
+        center = (p + z * z / (2 * n)) / (1 + z * z / n)
+        half_width = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+        return max(0.0, center - half_width)  # lower bound
 
 
 class MarketPatternLearner:
@@ -272,11 +288,15 @@ class MarketPatternLearner:
                 category="market_pattern",
                 city=edge.city,
                 content=(
+                    f"[edge_name={edge.name}] "
+                    f"[mean_edge={edge.mean_edge:.4f}] "
+                    f"[window={edge.name}] "
                     f"{edge.description} | "
                     f"Hit rate: {edge.hit_rate:.0%}, n={edge.sample_size}. "
                     f"Rule: {edge.actionable_rule}"
                 ),
-                confidence=min(0.95, edge.hit_rate * (1 - 1 / math.sqrt(edge.sample_size))),
+                # Use Wilson-score lower bound for confidence (statistically grounded)
+                confidence=min(0.90, edge.statistical_confidence),
                 supporting_records=[],
             )
             self._memory.add_lesson(lesson)
@@ -288,46 +308,55 @@ class MarketPatternLearner:
         )
         return new_lessons
 
+    @staticmethod
+    def _extract_mean_edge(lesson_content: str) -> Optional[float]:
+        """
+        Extract the numeric mean_edge stored directly in the structured
+        lesson content tag: [mean_edge=0.0712]. No fragile text parsing needed.
+        """
+        import re
+        match = re.search(r"\[mean_edge=([+-]?\d+\.\d+)\]", lesson_content)
+        if match:
+            return float(match.group(1))
+        return None
+
     def ev_adjustment_for_city(self, city: str) -> float:
         """
-        Return a probability adjustment (delta) to apply for a given city
-        based on discovered city market bias. Positive = market overprices YES.
+        Return a probability adjustment (delta) to apply for a given city.
+        Reads mean_edge directly from the structured tag in lesson content.
+        Positive = market overprices YES → we should discount YES probability.
         """
         city_lessons = [
             l for l in self._memory.lessons
             if l.city == city and l.category == "market_pattern"
-            and "systematically" in l.content
+            and "city_bias" in l.content
         ]
         if not city_lessons:
             return 0.0
-        # Use highest-confidence lesson
         best = max(city_lessons, key=lambda l: l.reliability_score)
-        # Parse mean_edge from content if possible
-        import re
-        match = re.search(r"by ([+-]?\d+\.\d+)%", best.content)
-        if match:
-            return float(match.group(1)) / 100.0
-        return 0.0
+        return self._extract_mean_edge(best.content) or 0.0
 
     def timing_adjustment(self, hours_to_resolution: float) -> float:
         """
-        Return a probability adjustment for a given time-to-resolution
-        based on learned timing effects.
+        Return a probability adjustment for a given time-to-resolution.
+        Reads mean_edge directly from the structured tag in lesson content.
         """
-        window = (
-            "2-12h" if 2 <= hours_to_resolution < 12 else
-            "12-24h" if 12 <= hours_to_resolution < 24 else
-            "24-48h" if 24 <= hours_to_resolution < 48 else
-            "48-72h"
-        )
+        if hours_to_resolution < 2:
+            window = "2-12h"
+        elif hours_to_resolution < 12:
+            window = "2-12h"
+        elif hours_to_resolution < 24:
+            window = "12-24h"
+        elif hours_to_resolution < 48:
+            window = "24-48h"
+        else:
+            window = "48-72h"
+
         timing_lessons = [
             l for l in self._memory.lessons
-            if l.category == "market_pattern" and window in l.content
+            if l.category == "market_pattern" and f"timing_{window}" in l.content
         ]
         if not timing_lessons:
             return 0.0
-        import re
-        match = re.search(r"by ([+-]?\d+\.\d+)%", timing_lessons[0].content)
-        if match:
-            return float(match.group(1)) / 100.0
-        return 0.0
+        best = max(timing_lessons, key=lambda l: l.reliability_score)
+        return self._extract_mean_edge(best.content) or 0.0
