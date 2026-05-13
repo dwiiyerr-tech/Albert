@@ -10,7 +10,7 @@ import datetime
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Optional
 
 from config import STOP_LOSS_PCT, TRAILING_STOP_TRIGGER
@@ -32,6 +32,7 @@ class Position:
     bucket_low: float
     bucket_high: float
     target_date: str
+    order_id: str = ""       # CLOB order ID from Polymarket; empty for paper/demo trades
     stop_price: float = 0.0
     trailing_active: bool = False
     closed: bool = False
@@ -49,7 +50,8 @@ class Position:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Position":
-        return cls(**d)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 class PositionManager:
@@ -101,6 +103,7 @@ class PositionManager:
         bucket_low: float,
         bucket_high: float,
         target_date: str,
+        order_id: str = "",
     ) -> Position:
         # Fix: stop-loss direction depends on YES vs NO position.
         # YES (long): stop below entry;  NO (short): stop above entry.
@@ -120,6 +123,7 @@ class PositionManager:
             bucket_low=bucket_low,
             bucket_high=bucket_high,
             target_date=target_date,
+            order_id=order_id,
             stop_price=stop,
         )
         self.open_positions[market_id] = pos

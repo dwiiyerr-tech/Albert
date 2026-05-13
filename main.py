@@ -24,18 +24,23 @@ import datetime
 import logging
 import threading
 import time
+from typing import Optional
 
 from config import (
     CITIES,
     UPDATE_INTERVAL_SECONDS,
     SIM_ROUNDS,
     HIGH_SPREAD_THRESHOLD_F,
+    POLYMARKET_API_KEY,
+    POLYMARKET_PRIVATE_KEY,
+    POLYMARKET_PROXY_ADDRESS,
+    POLYMARKET_BASE,
 )
 from utils import setup_logging
 from weather_data import fetch_city_forecast, CityForecast, get_historical_temp
 from simulation import WeatherSimulation, WeatherKnowledgeGraph, ReportGenerator
 from simulation.agents import SimulationResult
-from trading import EVCalculator, MarketScanner, PositionManager, TradeSignal
+from trading import EVCalculator, MarketScanner, PositionManager, TradeSignal, PolymarketOrderExecutor
 from learning import (
     ExperienceMemory,
     SelfReflectionEngine,
@@ -84,6 +89,21 @@ class MiroWeatherAgent:
             calibrator=self.calibrator,
             market_learner=self.market_learner,
         )
+
+        # Live order executor — only active when --live and keys are configured
+        self.executor: Optional[PolymarketOrderExecutor] = None
+        if not dry_run and demo_session is None:
+            self.executor = PolymarketOrderExecutor(
+                private_key=POLYMARKET_PRIVATE_KEY,
+                api_key=POLYMARKET_API_KEY,
+                proxy_address=POLYMARKET_PROXY_ADDRESS,
+                host=POLYMARKET_BASE,
+            )
+            if not self.executor.is_configured():
+                logger.warning(
+                    "Live mode active but order executor is not configured — "
+                    "check POLYMARKET_PRIVATE_KEY and that py-clob-client is installed."
+                )
 
         # Seed knowledge graph with configured cities
         for city_cfg in CITIES:
@@ -159,6 +179,10 @@ class MiroWeatherAgent:
             # Resolve any related open position
             pnl = None
             if rec.market_id and rec.market_id in self.positions.open_positions:
+                open_pos = self.positions.open_positions[rec.market_id]
+                # Cancel the CLOB order if it hasn't fully filled yet (live mode only)
+                if self.executor and self.executor.is_configured() and open_pos.order_id:
+                    self.executor.cancel_order(open_pos.order_id)
                 pos = self.positions.close_position(rec.market_id, reason="resolved")
                 if pos:
                     pnl = pos.pnl_usd
@@ -348,6 +372,7 @@ class MiroWeatherAgent:
                 hours_to_resolution=market["hours_to_resolution"],
                 volume=market["volume"],
                 spread=market["spread"],
+                no_token_id=market.get("no_token_id", ""),
             )
             if signal and signal.is_actionable:
                 actionable.append(signal)
@@ -447,6 +472,20 @@ class MiroWeatherAgent:
                             signal.ev, signal.recommended_usd,
                             self._demo.wallet.available(self.positions))
             elif not self.dry_run:
+                if signal.market_id in self.positions.open_positions:
+                    logger.debug("Already open: %s — skipping", signal.market_id)
+                    continue
+
+                order_id: Optional[str] = None
+                if self.executor and self.executor.is_configured():
+                    order_id = self.executor.place_order(signal)
+                    if order_id is None:
+                        logger.warning(
+                            "LIVE: order submission failed for %s %s — position not opened",
+                            signal.direction, signal.city,
+                        )
+                        continue
+
                 self.positions.open_position(
                     market_id=signal.market_id,
                     city=signal.city,
@@ -456,6 +495,12 @@ class MiroWeatherAgent:
                     bucket_low=signal.bucket_low,
                     bucket_high=signal.bucket_high,
                     target_date=signal.target_date,
+                    order_id=order_id or "",
+                )
+                logger.info(
+                    "LIVE TRADE: %s %s %s EV=%.3f $%.2f order_id=%s",
+                    signal.direction, signal.city, signal.target_date,
+                    signal.ev, signal.recommended_usd, order_id or "N/A",
                 )
 
         # ── Step 9: Reports ───────────────────────────────────────────────────

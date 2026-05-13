@@ -77,7 +77,9 @@ class MarketScanner:
                     continue
 
                 # Fetch live order book for price
-                clob_token_id = market.get("clobTokenIds", [""])[0]
+                clob_token_ids = market.get("clobTokenIds", [""])
+                clob_token_id = clob_token_ids[0] if clob_token_ids else ""
+                no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else ""
                 ob = self._get(f"{POLYMARKET_BASE}/book", params={"token_id": clob_token_id})
                 if not ob:
                     continue
@@ -109,7 +111,8 @@ class MarketScanner:
                     b_low, b_high = b_high, b_low
 
                 markets.append({
-                    "market_id": market.get("id", ""),
+                    "market_id": clob_token_id,   # CLOB YES token ID for OrderArgs
+                    "no_token_id": no_token_id,    # CLOB NO token ID
                     "question": question,
                     "price_yes": mid,
                     "price_no": 1 - mid,

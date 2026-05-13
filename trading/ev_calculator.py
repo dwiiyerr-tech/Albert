@@ -47,6 +47,7 @@ class TradeSignal:
     hours_to_resolution: float
     volume: float
     market_id: str = ""
+    no_token_id: str = ""   # CLOB NO token ID (needed for live NO-direction orders)
 
     @property
     def is_actionable(self) -> bool:
@@ -153,6 +154,7 @@ class EVCalculator:
         hours_to_resolution: float,
         volume: float,
         spread: float,
+        no_token_id: str = "",
     ) -> Optional[TradeSignal]:
         """
         Generate a TradeSignal from a SimulationResult and live market data.
@@ -213,4 +215,5 @@ class EVCalculator:
             hours_to_resolution=hours_to_resolution,
             volume=volume,
             market_id=market_id,
+            no_token_id=no_token_id,
         )
