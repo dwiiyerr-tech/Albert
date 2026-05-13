@@ -43,6 +43,9 @@ from learning import (
     MarketPatternLearner,
 )
 
+# Demo session is optional; imported lazily to avoid patching anthropic too early
+_DemoSession = None
+
 # City lookup: name → config dict (for lat/lon in historical temp)
 _CITY_BY_NAME: dict[str, dict] = {c["name"]: c for c in CITIES}
 
@@ -58,14 +61,16 @@ class MiroWeatherAgent:
       data → observe → reflect → calibrate → simulate → trade → learn
     """
 
-    def __init__(self, dry_run: bool = True) -> None:
+    def __init__(self, dry_run: bool = True, demo_session=None) -> None:
         self.dry_run = dry_run
+        self._demo: "demo.session.DemoSession | None" = demo_session
 
         # Core modules
         self.knowledge_graph = WeatherKnowledgeGraph()
         self.reporter = ReportGenerator()
         self.scanner = MarketScanner()
-        self.positions = PositionManager()
+        positions_file = "positions_demo.json" if demo_session else "positions.json"
+        self.positions = PositionManager(positions_file=positions_file)
 
         # Learning stack
         self.memory = ExperienceMemory()
@@ -402,7 +407,32 @@ class MiroWeatherAgent:
 
         # ── Step 8: Execute actionable signals ───────────────────────────────
         for signal in actionable:
-            if not self.dry_run:
+            if self._demo:
+                # Demo mode: open position virtually, gated by virtual wallet
+                if signal.market_id in self.positions.open_positions:
+                    self._demo.record_trade(signal, executed=False, skip_reason="already open")
+                    continue
+                if not self._demo.wallet.can_open(signal.recommended_usd, self.positions):
+                    self._demo.record_trade(signal, executed=False, skip_reason="insufficient virtual balance")
+                    logger.info("DEMO: insufficient virtual balance for %s %s $%.2f",
+                                signal.city, signal.direction, signal.recommended_usd)
+                    continue
+                self.positions.open_position(
+                    market_id=signal.market_id,
+                    city=signal.city,
+                    direction=signal.direction,
+                    entry_price=signal.market_price,
+                    size_usd=signal.recommended_usd,
+                    bucket_low=signal.bucket_low,
+                    bucket_high=signal.bucket_high,
+                    target_date=signal.target_date,
+                )
+                self._demo.record_trade(signal, executed=True)
+                logger.info("DEMO TRADE: %s %s %s EV=%.3f $%.2f  (virtual balance: $%.2f)",
+                            signal.direction, signal.city, signal.target_date,
+                            signal.ev, signal.recommended_usd,
+                            self._demo.wallet.available(self.positions))
+            elif not self.dry_run:
                 self.positions.open_position(
                     market_id=signal.market_id,
                     city=signal.city,
@@ -490,6 +520,60 @@ class MiroWeatherAgent:
                 logger.error("Cycle error: %s", exc, exc_info=True)
             time.sleep(UPDATE_INTERVAL_SECONDS)
 
+    def run_demo(self, days_ahead: int = 1) -> None:
+        """
+        Run Albert in demo/paper-trading mode:
+          • Virtual wallet — blocks overspending
+          • Token counting — estimates API cost
+          • Error collection — captures all exceptions without crashing
+          • Session report  — printed when max_cycles is reached or Ctrl+C
+        """
+        if self._demo is None:
+            raise RuntimeError("run_demo() requires a DemoSession — pass demo_session= to __init__")
+
+        demo = self._demo
+        interval = demo.cycle_interval_seconds
+
+        print(f"\n{'='*64}")
+        print(f"  ALBERT MIRO WEATHER — DEMO MODE")
+        print(f"  Virtual balance : ${demo.virtual_balance:.2f}")
+        print(f"  Max cycles      : {demo.max_cycles}")
+        print(f"  Interval        : {interval}s between cycles")
+        print(f"  Sim rounds      : {self.simulator._sim_rounds} (normal: {SIM_ROUNDS})")
+        print(f"  Positions file  : positions_demo.json  (isolated from live)")
+        print(f"{'='*64}\n")
+
+        try:
+            while demo.should_continue():
+                cycle_num = demo.cycles_completed + 1
+                demo.begin_cycle(cycle_num)
+
+                print(f"\n── Demo Cycle {cycle_num}/{demo.max_cycles} ──────────────────────")
+                try:
+                    signals = self.run_cycle(days_ahead=days_ahead)
+                    trades_executed = sum(
+                        1 for t in demo._trades if t.cycle == cycle_num and t.executed
+                    )
+                    demo.end_cycle(len(signals), trades_executed)
+                    print(f"   Signals: {len(signals)}  |  Trades: {trades_executed}  |  "
+                          f"Tokens: {demo.tokens.input_tokens:,} in  |  "
+                          f"Est. cost: ${demo.tokens.cost_usd:.4f}")
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    demo.record_error(f"run_cycle #{cycle_num}", exc)
+                    demo.end_cycle(0, 0)
+                    logger.error("DEMO cycle error: %s", exc, exc_info=True)
+
+                if demo.should_continue() and interval > 0:
+                    print(f"   Waiting {interval}s before next cycle…")
+                    time.sleep(interval)
+
+        except KeyboardInterrupt:
+            print("\n  Demo interrupted by user.")
+
+        demo.print_report(position_manager=self.positions)
+
     def run_with_tui(self, days_ahead: int = 1) -> None:
         """
         Start agent loop in a background thread, then run the rich TUI
@@ -548,11 +632,41 @@ def main() -> None:
                         help="Execute real trades (default: dry run)")
     parser.add_argument("--tui", action="store_true",
                         help="Launch real-time terminal dashboard (Albert Miro Weather)")
+    # ── Demo mode ────────────────────────────────────────────────────────────
+    parser.add_argument("--demo", action="store_true",
+                        help="Run in demo/paper-trading mode with virtual wallet + token tracking")
+    parser.add_argument("--demo-balance", type=float, default=1000.0, metavar="USD",
+                        help="Virtual starting balance for demo mode (default: $1000)")
+    parser.add_argument("--demo-cycles", type=int, default=3, metavar="N",
+                        help="Number of cycles to run in demo mode (default: 3)")
+    parser.add_argument("--demo-interval", type=int, default=0, metavar="SEC",
+                        help="Seconds between demo cycles, 0=no delay (default: 0)")
+    parser.add_argument("--demo-sim-rounds", type=int, default=1, metavar="N",
+                        help="Debate rounds per city in demo to save tokens (default: 1)")
+    parser.add_argument("--demo-token-budget", type=int, default=200_000, metavar="N",
+                        help="Warn when input tokens exceed this (default: 200000)")
+    # ─────────────────────────────────────────────────────────────────────────
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
     setup_logging(args.log_level)
+
+    if args.demo:
+        # Demo must patch anthropic BEFORE MiroWeatherAgent is instantiated
+        from demo.session import DemoSession
+        session = DemoSession(
+            virtual_balance=args.demo_balance,
+            max_cycles=args.demo_cycles,
+            cycle_interval_seconds=args.demo_interval,
+            token_budget=args.demo_token_budget,
+        )
+        session.install_token_tracking()
+        agent = MiroWeatherAgent(dry_run=False, demo_session=session)
+        # Override sim rounds to save tokens
+        agent.simulator._sim_rounds = args.demo_sim_rounds
+        agent.run_demo(days_ahead=args.days_ahead)
+        return
 
     agent = MiroWeatherAgent(dry_run=not args.live)
 

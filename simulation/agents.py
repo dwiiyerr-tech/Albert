@@ -87,10 +87,15 @@ class WeatherSimulation:
     - Provides historical city context in the debate
     """
 
-    def __init__(self, experience_memory: Optional["ExperienceMemory"] = None) -> None:
+    def __init__(
+        self,
+        experience_memory: Optional["ExperienceMemory"] = None,
+        sim_rounds: Optional[int] = None,
+    ) -> None:
         self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         self._agent_histories: dict[str, list[str]] = {}  # per-agent conversation memory
         self._exp_memory = experience_memory
+        self._sim_rounds = sim_rounds if sim_rounds is not None else SIM_ROUNDS
 
     def _get_learned_context(self, city: str) -> str:
         """Build a lessons block to inject into agent system prompts."""
@@ -180,7 +185,7 @@ where p is YOUR probability estimate that the actual max temperature will fall i
         # shared debate transcript injected as context
         debate_transcript: list[str] = []
 
-        for round_num in range(1, SIM_ROUNDS + 1):
+        for round_num in range(1, self._sim_rounds + 1):
             for persona in personas:
                 agent_name = persona["name"]
                 context_block = ""
@@ -229,7 +234,7 @@ where p is YOUR probability estimate that the actual max temperature will fall i
         final_round_probs = [
             t.probability_estimate
             for t in turns
-            if t.round_num == SIM_ROUNDS and t.probability_estimate is not None
+            if t.round_num == self._sim_rounds and t.probability_estimate is not None
         ]
         consensus = sum(final_round_probs) / len(final_round_probs) if final_round_probs else 0.5
 
