@@ -61,9 +61,10 @@ class MiroWeatherAgent:
       data → observe → reflect → calibrate → simulate → trade → learn
     """
 
-    def __init__(self, dry_run: bool = True, demo_session=None) -> None:
+    def __init__(self, dry_run: bool = True, demo_session=None, human_loop=None) -> None:
         self.dry_run = dry_run
-        self._demo: "demo.session.DemoSession | None" = demo_session
+        self._demo = demo_session
+        self._hitl = human_loop   # HumanApprovalManager or None
 
         # Core modules
         self.knowledge_graph = WeatherKnowledgeGraph()
@@ -392,6 +393,10 @@ class MiroWeatherAgent:
         self._cycle_state["last_sim_result"] = {}
         self._cycle_state["current_city"] = "—"
 
+        # Reset human-loop per-cycle flags (approve-all / skip-all expire each cycle)
+        if self._hitl:
+            self._hitl.reset_cycle_flags()
+
         logger.info("═══ MiroWeather cycle: target=%s | lessons=%d | resolved=%d ═══",
                     target_str, len(self.memory.lessons),
                     len(self.memory.resolved_records()))
@@ -421,6 +426,17 @@ class MiroWeatherAgent:
 
         # ── Step 8: Execute actionable signals ───────────────────────────────
         for signal in actionable:
+            # ── Human-in-the-loop gate ────────────────────────────────────────
+            if self._hitl and self._hitl.needs_review(signal):
+                approved = self._hitl.request_approval(
+                    signal,
+                    sim_state=self._cycle_state.get("last_sim_result"),
+                )
+                if not approved:
+                    logger.info("HITL: signal rejected by human — %s %s EV=%.3f",
+                                signal.city, signal.direction, signal.ev)
+                    continue
+
             if self._demo:
                 # Demo mode: open position virtually, gated by virtual wallet
                 if signal.market_id in self.positions.open_positions:
@@ -659,12 +675,38 @@ def main() -> None:
                         help="Debate rounds per city in demo to save tokens (default: 1)")
     parser.add_argument("--demo-token-budget", type=int, default=200_000, metavar="N",
                         help="Warn when input tokens exceed this (default: 200000)")
+    # ── Human-in-the-loop ────────────────────────────────────────────────────
+    parser.add_argument("--human-loop", action="store_true",
+                        help="Pause and ask for approval before each trade (interactive mode)")
+    parser.add_argument("--human-loop-queue", action="store_true",
+                        help="Queue signals for async approval via --review (daemon-friendly)")
+    parser.add_argument("--hl-min-ev", type=float, default=0.0, metavar="EV",
+                        help="Only ask for approval when signal EV >= this (default: 0 = always)")
+    parser.add_argument("--hl-min-usd", type=float, default=0.0, metavar="USD",
+                        help="Only ask for approval when trade size >= this USD (default: 0 = always)")
+    parser.add_argument("--hl-timeout", type=int, default=300, metavar="SEC",
+                        help="Queue mode: seconds to wait for decision before skipping (default: 300)")
+    parser.add_argument("--review", action="store_true",
+                        help="Review and approve/reject queued trade signals interactively")
+    parser.add_argument("--queue-status", action="store_true",
+                        help="Show current status of the pending review queue")
     # ─────────────────────────────────────────────────────────────────────────
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
     setup_logging(args.log_level)
+
+    # ── Queue-only commands (no agent needed) ─────────────────────────────────
+    if args.review:
+        from human_loop import HumanApprovalManager
+        HumanApprovalManager.run_review_cli()
+        return
+
+    if args.queue_status:
+        from human_loop import HumanApprovalManager
+        HumanApprovalManager.show_queue_status()
+        return
 
     if args.demo:
         # Demo must patch anthropic BEFORE MiroWeatherAgent is instantiated
@@ -682,7 +724,21 @@ def main() -> None:
         agent.run_demo(days_ahead=args.days_ahead)
         return
 
-    agent = MiroWeatherAgent(dry_run=not args.live)
+    # Build human-loop manager if requested
+    hitl = None
+    if args.human_loop or args.human_loop_queue:
+        from human_loop import HumanApprovalManager
+        mode = "queue" if args.human_loop_queue else "interactive"
+        hitl = HumanApprovalManager(
+            mode=mode,
+            min_ev=args.hl_min_ev,
+            min_usd=args.hl_min_usd,
+            timeout_secs=args.hl_timeout,
+        )
+        print(f"Human-in-the-loop ACTIVE — mode={mode} "
+              f"min_ev={args.hl_min_ev:.2f} min_usd=${args.hl_min_usd:.2f}")
+
+    agent = MiroWeatherAgent(dry_run=not args.live, human_loop=hitl)
 
     if args.tui:
         agent.run_with_tui(days_ahead=args.days_ahead)
