@@ -18,7 +18,7 @@ from typing import Optional
 
 import anthropic
 
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_MODEL
 from learning.memory import ExperienceMemory, Lesson, PredictionRecord
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,10 @@ class SelfReflectionEngine:
     """
 
     def __init__(self, memory: ExperienceMemory) -> None:
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self._client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            **({"base_url": ANTHROPIC_BASE_URL} if ANTHROPIC_BASE_URL else {}),
+        )
         self._memory = memory
 
     # ─── Tool definitions ─────────────────────────────────────────────────────

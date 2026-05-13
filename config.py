@@ -40,6 +40,9 @@ def _require_env(name: str) -> str:
 # Validated at import time: agent cannot start without this key.
 ANTHROPIC_API_KEY = _require_env("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+# Optional: custom base URL for API-compatible proxies or private deployments.
+# Leave blank to use the default Anthropic endpoint.
+ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
 
 # ─── Weather Data Sources ─────────────────────────────────────────────────────
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
@@ -51,6 +54,11 @@ VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY", "")
 POLYMARKET_BASE = "https://clob.polymarket.com"
 POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 POLYMARKET_API_KEY = os.getenv("POLYMARKET_API_KEY", "")
+# Ethereum private key for signing CLOB orders (required for live trading).
+# Format: hex string with or without 0x prefix.
+POLYMARKET_PRIVATE_KEY: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+# Optional proxy wallet address (used when trading via a Polymarket proxy contract).
+POLYMARKET_PROXY_ADDRESS: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
 
 # ─── Trading Parameters ───────────────────────────────────────────────────────
 MIN_EV = float(os.getenv("MIN_EV", "0.10"))

@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Optional
 import anthropic
 
 from config import (
-    ANTHROPIC_API_KEY, CLAUDE_MODEL,
+    ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_MODEL,
     MAX_AGENTS_PER_SIM, SIM_ROUNDS,
     SCENARIO_SPECULATION, SCENARIO_THRESHOLD_F,
 )
@@ -133,7 +133,10 @@ class WeatherSimulation:
         experience_memory: Optional["ExperienceMemory"] = None,
         sim_rounds: Optional[int] = None,
     ) -> None:
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self._client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            **({"base_url": ANTHROPIC_BASE_URL} if ANTHROPIC_BASE_URL else {}),
+        )
         self._exp_memory = experience_memory
         self._sim_rounds = sim_rounds if sim_rounds is not None else SIM_ROUNDS
         self._use_scenarios = SCENARIO_SPECULATION
