@@ -342,7 +342,7 @@ class MarketPatternLearner:
         Reads mean_edge directly from the structured tag in lesson content.
         """
         if hours_to_resolution < 2:
-            window = "2-12h"
+            window = "0-2h"
         elif hours_to_resolution < 12:
             window = "2-12h"
         elif hours_to_resolution < 24:

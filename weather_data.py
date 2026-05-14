@@ -78,6 +78,8 @@ class CityForecast:
         if not readings:
             return None
         total_weight = sum(r.confidence for r in readings)
+        if total_weight <= 0:
+            return sum(r.temp_f for r in readings) / len(readings)
         return sum(r.temp_f * r.confidence for r in readings) / total_weight
 
     @property
@@ -98,16 +100,6 @@ class CityForecast:
             "gfs_f": self.gfs.temp_f if self.gfs else None,
             "metar_f": self.metar.temp_f if self.metar else None,
         }
-
-
-def _safe_get(url: str, params: dict, timeout: int = 10) -> Optional[dict]:
-    try:
-        resp = requests.get(url, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        logger.warning("HTTP request failed: %s | %s", url, exc)
-        return None
 
 
 def get_ecmwf_forecast(lat: float, lon: float, city: str, target_date: datetime.date) -> Optional[TemperatureReading]:
@@ -178,10 +170,12 @@ def get_metar_observation(icao: str, city: str) -> Optional[TemperatureReading]:
         if raw is None:
             logger.warning("METAR %s: no temperature field found in %s", icao, list(obs.keys()))
             return None
-        temp_c = float(raw)
-        # If the value looks like Fahrenheit (> 60 in summer) and field was tmpf, convert
-        if "f" in (field_name or "").lower() and temp_c > 50:
-            temp_c = (temp_c - 32) * 5 / 9
+        raw_val = float(raw)
+        # If field name contains 'f' (tmpf, tempF) the value is Fahrenheit — always convert
+        if "f" in (field_name or "").lower():
+            temp_c = (raw_val - 32) * 5 / 9
+        else:
+            temp_c = raw_val
         today = datetime.date.today()
         return TemperatureReading(source="METAR", city=city, date=today,
                                   temp_c=temp_c, confidence=0.95)

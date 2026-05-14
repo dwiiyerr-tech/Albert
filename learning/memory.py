@@ -12,6 +12,7 @@ import datetime
 import json
 import logging
 import os
+import threading
 import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
@@ -156,6 +157,7 @@ class ExperienceMemory:
 
     def __init__(self, memory_file: str = MEMORY_FILE) -> None:
         self._file = memory_file
+        self._lock = threading.RLock()
         self.predictions: dict[str, PredictionRecord] = {}
         self.observations: list[MarketObservation] = []
         self.lessons: list[Lesson] = []
@@ -184,37 +186,41 @@ class ExperienceMemory:
             logger.warning("Memory load failed: %s", exc)
 
     def save(self) -> None:
-        # Keep only most recent 1000 predictions to bound file size
-        all_preds = sorted(self.predictions.values(), key=lambda r: r.created_ts, reverse=True)
-        payload = {
-            "predictions": [r.to_dict() for r in all_preds[:1000]],
-            "observations": [o.to_dict() for o in self.observations[-2000:]],
-            "lessons": [l.to_dict() for l in self.lessons],
-        }
+        with self._lock:
+            # Keep only most recent 1000 predictions to bound file size
+            all_preds = sorted(self.predictions.values(), key=lambda r: r.created_ts, reverse=True)
+            payload = {
+                "predictions": [r.to_dict() for r in all_preds[:1000]],
+                "observations": [o.to_dict() for o in self.observations[-2000:]],
+                "lessons": [l.to_dict() for l in self.lessons],
+            }
         tmp_file = self._file + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
         os.replace(tmp_file, self._file)  # atomic write
         logger.debug("Memory saved (%d predictions, %d observations, %d lessons)",
-                     len(all_preds[:1000]), len(self.observations), len(self.lessons))
+                     len(all_preds[:1000]), len(payload["observations"]), len(payload["lessons"]))
 
     # ─── Write ────────────────────────────────────────────────────────────────
 
     def record_prediction(self, **kwargs) -> PredictionRecord:
         rec = PredictionRecord(id=str(uuid.uuid4()), **kwargs)
-        self.predictions[rec.id] = rec
+        with self._lock:
+            self.predictions[rec.id] = rec
         return rec
 
     def record_observation(self, **kwargs) -> MarketObservation:
         obs = MarketObservation(id=str(uuid.uuid4()), **kwargs)
-        self.observations.append(obs)
+        with self._lock:
+            self.observations.append(obs)
         return obs
 
     def add_lesson(self, lesson: Lesson) -> None:
-        existing = [l for l in self.lessons if l.content.strip() == lesson.content.strip()]
-        if not existing:
-            self.lessons.append(lesson)
-            logger.info("New lesson added [%s]: %s", lesson.category, lesson.content[:80])
+        with self._lock:
+            existing = [l for l in self.lessons if l.content.strip() == lesson.content.strip()]
+            if not existing:
+                self.lessons.append(lesson)
+                logger.info("New lesson added [%s]: %s", lesson.category, lesson.content[:80])
 
     def validate_lesson(self, lesson_id: str, confirmed: bool) -> None:
         """

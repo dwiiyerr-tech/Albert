@@ -171,6 +171,9 @@ class EVCalculator:
 
         # Apply learned probability corrections
         raw_p = sim.consensus_probability
+        if math.isnan(raw_p) or raw_p <= 0 or raw_p >= 1:
+            logger.warning("Invalid consensus_probability %.4f for %s — skipping", raw_p, sim.city)
+            return None
         p_yes, adjustments = self._adjust_probability(raw_p, sim.city, hours_to_resolution)
         if adjustments:
             import logging

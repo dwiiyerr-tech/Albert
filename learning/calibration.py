@@ -40,7 +40,8 @@ def _choose_edges(n_global: int) -> list[float]:
 def _bin_index(p: float, edges: list[float]) -> int:
     n_bins = len(edges) - 1
     step = edges[1] - edges[0]
-    return min(int(p / step), n_bins - 1)
+    p_clamped = max(0.0, min(1.0, p))
+    return min(int(p_clamped / step), n_bins - 1)
 
 
 class CalibrationBin:
