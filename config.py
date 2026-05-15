@@ -36,13 +36,53 @@ def _require_env(name: str) -> str:
     return val
 
 
-# ─── LLM / Claude API ────────────────────────────────────────────────────────
-# Validated at import time: agent cannot start without this key.
-ANTHROPIC_API_KEY = _require_env("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+def _first_env(*names: str) -> str:
+    for name in names:
+        val = os.getenv(name, "")
+        if val:
+            return val
+    return ""
+
+
+def require_llm_api_key() -> str:
+    """Return the configured LLM API key, validating only when a client is needed."""
+    if os.getenv("LLM_PROVIDER", "anthropic").lower() == "mock":
+        return "mock"
+    val = _first_env("LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+    if not val:
+        print(
+            "ERROR: no LLM API key is configured. Set LLM_API_KEY, "
+            "ANTHROPIC_API_KEY, or OPENAI_API_KEY, or run 'python main.py --setup'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return val
+
+
+def require_anthropic_api_key() -> str:
+    """Backward-compatible alias for older imports."""
+    return require_llm_api_key()
+
+
+# ─── LLM API ─────────────────────────────────────────────────────────────────
+# Generic LLM settings. Provider values:
+#   anthropic          Native Anthropic Messages API
+#   openai-compatible  OpenAI-compatible /chat/completions APIs
+#   mock               Deterministic offline responses for smoke tests only
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
+LLM_API_KEY = _first_env("LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+LLM_MODEL = os.getenv("LLM_MODEL", os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"))
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", os.getenv("ANTHROPIC_BASE_URL", ""))
+# Optional comma-separated ensemble, e.g.
+#   mock,openai-compatible:gpt-4.1:https://api.openai.com/v1
+LLM_ENSEMBLE = os.getenv("LLM_ENSEMBLE", "").strip()
+
+# Backward-compatible Anthropic names.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = LLM_MODEL
 # Optional: custom base URL for API-compatible proxies or private deployments.
 # Leave blank to use the default Anthropic endpoint.
-ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
+ANTHROPIC_BASE_URL: str = LLM_BASE_URL
 
 # ─── Weather Data Sources ─────────────────────────────────────────────────────
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
@@ -59,6 +99,9 @@ POLYMARKET_API_KEY = os.getenv("POLYMARKET_API_KEY", "")
 POLYMARKET_PRIVATE_KEY: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
 # Optional proxy wallet address (used when trading via a Polymarket proxy contract).
 POLYMARKET_PROXY_ADDRESS: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
+
+# ─── Runtime Mode ────────────────────────────────────────────────────────────
+DEFAULT_MODE = os.getenv("DEFAULT_MODE", "dry").lower()
 
 # ─── Trading Parameters ───────────────────────────────────────────────────────
 MIN_EV = float(os.getenv("MIN_EV", "0.10"))
@@ -97,6 +140,12 @@ SCENARIO_SPECULATION = os.getenv("SCENARIO_SPECULATION", "true").lower() != "fal
 # Only activate scenario mode when model spread exceeds this threshold (°F).
 # Set to 0.0 to always use scenarios; set to 99.0 to always use classic debate.
 SCENARIO_THRESHOLD_F = float(os.getenv("SCENARIO_THRESHOLD_F", "0.0"))
+PERSONA_WEIGHTING = os.getenv("PERSONA_WEIGHTING", "true").lower() != "false"
+SAVE_DEBATE_TRANSCRIPTS = os.getenv("SAVE_DEBATE_TRANSCRIPTS", "true").lower() != "false"
+SELF_PLAY_REFLECTION = os.getenv("SELF_PLAY_REFLECTION", "true").lower() != "false"
+DEMO_SYNTHETIC_MARKETS = os.getenv("DEMO_SYNTHETIC_MARKETS", "true").lower() != "false"
+MARKET_SCANNER_DEBUG = os.getenv("MARKET_SCANNER_DEBUG", "false").lower() == "true"
+MAX_DEBATE_TRANSCRIPTS = int(os.getenv("MAX_DEBATE_TRANSCRIPTS", "200"))
 
 # ─── Monitored Cities ────────────────────────────────────────────────────────
 CITIES = [

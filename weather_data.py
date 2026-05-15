@@ -284,17 +284,34 @@ def fetch_city_forecast(city_cfg: dict, target_date: datetime.date) -> CityForec
 
 def parse_temp_range(question: str) -> Optional[tuple[float, float]]:
     """Extract (low, high) °F bounds from a Polymarket market question string."""
-    pattern = r"([-\d]+)\s*[-–]\s*([-\d]+)\s*°?[Ff]"
+    pattern = r"([-\d]+)\s*(?:-|–|to|and)\s*([-\d]+)\s*(?:°?\s*[Ff]|degrees?)?"
     match = re.search(pattern, question)
     if match:
         return float(match.group(1)), float(match.group(2))
-    # single-threshold markets: "above 95°F"
-    above = re.search(r"above\s+([-\d]+)\s*°?[Ff]", question, re.IGNORECASE)
+    # single-threshold markets: "above 95°F", "over 80 degrees", "at least 70"
+    above = re.search(
+        r"(?:above|over|at\s+least|greater\s+than|exceed(?:s|ing)?)\s+([-\d]+)\s*(?:°?\s*[Ff]|degrees?)?",
+        question,
+        re.IGNORECASE,
+    )
     if above:
         v = float(above.group(1))
         return v, float("inf")
-    below = re.search(r"below\s+([-\d]+)\s*°?[Ff]", question, re.IGNORECASE)
+    # "80°F or higher"
+    higher = re.search(r"([-\d]+)\s*(?:°?\s*[Ff]|degrees?)?\s+or\s+(?:higher|above|more)", question, re.IGNORECASE)
+    if higher:
+        v = float(higher.group(1))
+        return v, float("inf")
+    below = re.search(
+        r"(?:below|under|less\s+than|at\s+most|no\s+more\s+than)\s+([-\d]+)\s*(?:°?\s*[Ff]|degrees?)?",
+        question,
+        re.IGNORECASE,
+    )
     if below:
         v = float(below.group(1))
+        return float("-inf"), v
+    lower = re.search(r"([-\d]+)\s*(?:°?\s*[Ff]|degrees?)?\s+or\s+(?:lower|below|less)", question, re.IGNORECASE)
+    if lower:
+        v = float(lower.group(1))
         return float("-inf"), v
     return None

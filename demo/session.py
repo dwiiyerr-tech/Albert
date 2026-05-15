@@ -4,14 +4,14 @@ Demo / Paper-Trading Session for Albert Miro Weather.
 Provides a safe sandbox to validate the agent works correctly before
 risking real funds.  Features:
   • Virtual wallet  — configurable starting balance, blocks overspending
-  • Token tracking  — counts all Claude API tokens + estimates USD cost
+  • Token tracking  — estimates all LLM tokens + USD cost
   • Error collector — captures every exception with context; never crashes
   • Cycle budgets   — hard stop after N cycles
   • Session report  — full rich-formatted summary at exit
 
 Usage (from main.py --demo):
     session = DemoSession(virtual_balance=1000.0, max_cycles=3)
-    session.install_token_tracking()   # must call BEFORE anthropic is imported
+    session.install_token_tracking()   # call BEFORE LLM clients are created
     agent = MiroWeatherAgent(demo_session=session)
     agent.run_demo(...)
     session.print_report()
@@ -23,14 +23,85 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Optional
 
-from rich import box
-from rich.console import Console, Group
-from rich.panel import Panel
-from rich.rule import Rule
-from rich.table import Table
-from rich.text import Text
+try:
+    from rich import box
+    from rich.console import Console, Group
+    from rich.panel import Panel
+    from rich.rule import Rule
+    from rich.table import Table
+    from rich.text import Text
+except ModuleNotFoundError:
+    import re
 
-# ─── Claude Sonnet pricing (USD per token, approximate) ──────────────────────
+    def _plain(value: object) -> str:
+        return re.sub(r"\[/?[^\]]+\]", "", str(value))
+
+    class _Box:
+        ROUNDED = None
+        SIMPLE_HEAVY = None
+        DOUBLE_EDGE = None
+
+    box = _Box()
+
+    class Console:
+        def print(self, *objects, **kwargs) -> None:
+            print(*(_plain(obj) for obj in objects))
+
+        def rule(self, title: str = "", **kwargs) -> None:
+            print(f"\n{'-' * 8} {_plain(title)} {'-' * 8}")
+
+    class Group:
+        def __init__(self, *items) -> None:
+            self.items = items
+
+        def __str__(self) -> str:
+            return "\n".join(_plain(i) for i in self.items)
+
+    class Panel:
+        def __init__(self, renderable, *args, title: str = "", **kwargs) -> None:
+            self.renderable = renderable
+            self.title = title
+
+        def __str__(self) -> str:
+            title = _plain(self.title)
+            body = _plain(self.renderable)
+            return f"{title}\n{body}" if title else body
+
+    class Rule:
+        def __init__(self, title: str = "", **kwargs) -> None:
+            self.title = title
+
+        def __str__(self) -> str:
+            return f"{'-' * 8} {_plain(self.title)} {'-' * 8}"
+
+    class Table:
+        def __init__(self, *args, **kwargs) -> None:
+            self._rows: list[tuple[str, ...]] = []
+
+        @classmethod
+        def grid(cls, *args, **kwargs):
+            return cls(*args, **kwargs)
+
+        def add_column(self, *args, **kwargs) -> None:
+            return None
+
+        def add_row(self, *values) -> None:
+            self._rows.append(tuple(_plain(v) for v in values))
+
+        def __str__(self) -> str:
+            return "\n".join("  ".join(row) for row in self._rows)
+
+    class Text:
+        def __init__(self, text: str = "", *args, **kwargs) -> None:
+            self._parts = [text] if text else []
+
+        def append(self, text: str, *args, **kwargs) -> None:
+            self._parts.append(text)
+
+        def __str__(self) -> str:
+            return "".join(self._parts)
+
+# ─── Default pricing estimate (USD per token, approximate) ───────────────────
 _INPUT_COST_PER_TOKEN  = 3.00  / 1_000_000   # $3.00 / M input tokens
 _OUTPUT_COST_PER_TOKEN = 15.00 / 1_000_000   # $15.00 / M output tokens
 
@@ -41,7 +112,7 @@ DEFAULT_TOKEN_BUDGET = 200_000   # warn (not block) above this many input tokens
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TokenCounter:
-    """Tracks cumulative token usage across all Claude API calls."""
+    """Tracks cumulative token usage across all LLM calls."""
 
     def __init__(self, budget: int = DEFAULT_TOKEN_BUDGET) -> None:
         self.input_tokens: int = 0
@@ -143,8 +214,7 @@ class _CycleSummary:
 class DemoSession:
     """
     Manages the full lifecycle of a demo/paper-trading session.
-    Must call install_token_tracking() BEFORE any anthropic.Anthropic()
-    instance is created (i.e., before MiroWeatherAgent is instantiated).
+    Must call install_token_tracking() before LLM clients are created.
     """
 
     def __init__(
@@ -175,38 +245,31 @@ class DemoSession:
 
     def install_token_tracking(self) -> None:
         """
-        Monkey-patch anthropic.Anthropic.__init__ so every instance created
-        anywhere in the codebase (reflection, simulation, reports) has its
-        messages.create wrapped with a token counter.
-
-        MUST be called before the first anthropic.Anthropic() is instantiated.
+        Monkey-patch the provider-neutral LLMClient so every call is counted.
         """
         if self._tracking_installed:
             return
 
-        import anthropic as _anthro
         _tracker = self.tokens
-        _orig_init = _anthro.Anthropic.__init__
 
-        def _patched_init(self_client, *args, **kwargs):
-            _orig_init(self_client, *args, **kwargs)
-            _orig_create = self_client.messages.create
+        try:
+            from llm_client import LLMClient
+            _orig_text = LLMClient.text
 
-            def _tracked_create(*a, **kw):
-                response = _orig_create(*a, **kw)
-                try:
-                    if getattr(response, "usage", None):
-                        _tracker.add(
-                            response.usage.input_tokens,
-                            response.usage.output_tokens,
-                        )
-                except Exception:
-                    pass
-                return response
+            def _tracked_text(self_client, *args, **kwargs):
+                system = kwargs.get("system", "")
+                messages = kwargs.get("messages", [])
+                approx_in = len(str(system)) // 4
+                approx_in += sum(len(str(m.get("content", ""))) // 4 for m in messages)
+                response_text = _orig_text(self_client, *args, **kwargs)
+                approx_out = len(response_text) // 4
+                _tracker.add(max(1, approx_in), max(1, approx_out))
+                return response_text
 
-            self_client.messages.create = _tracked_create
+            LLMClient.text = _tracked_text
+        except Exception:
+            pass
 
-        _anthro.Anthropic.__init__ = _patched_init
         self._tracking_installed = True
 
     # ─── Cycle lifecycle ─────────────────────────────────────────────────────

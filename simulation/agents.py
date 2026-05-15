@@ -28,13 +28,11 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-import anthropic
-
 from config import (
-    ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_MODEL,
     MAX_AGENTS_PER_SIM, SIM_ROUNDS,
-    SCENARIO_SPECULATION, SCENARIO_THRESHOLD_F,
+    PERSONA_WEIGHTING, SCENARIO_SPECULATION, SCENARIO_THRESHOLD_F,
 )
+from llm_client import LLMClient
 from weather_data import CityForecast
 
 if TYPE_CHECKING:
@@ -90,6 +88,8 @@ class AgentTurn:
     message: str
     probability_estimate: Optional[float] = None   # global estimate (classic mode)
     conditional_probs: Optional[list[float]] = None  # P(YES|scenario_i) (scenario mode)
+    provider: str = ""
+    model: str = ""
 
 
 @dataclass
@@ -133,10 +133,8 @@ class WeatherSimulation:
         experience_memory: Optional["ExperienceMemory"] = None,
         sim_rounds: Optional[int] = None,
     ) -> None:
-        self._client = anthropic.Anthropic(
-            api_key=ANTHROPIC_API_KEY,
-            **({"base_url": ANTHROPIC_BASE_URL} if ANTHROPIC_BASE_URL else {}),
-        )
+        self._clients = LLMClient.ensemble()
+        self._client = self._clients[0]
         self._exp_memory = experience_memory
         self._sim_rounds = sim_rounds if sim_rounds is not None else SIM_ROUNDS
         self._use_scenarios = SCENARIO_SPECULATION
@@ -187,6 +185,31 @@ class WeatherSimulation:
         updates = [f"  • {l.content.replace(f'[{persona_name.split()[0]} persona update] ', '')}"
                    for l in cal[-3:]]
         return "\nCalibration updates from experience:\n" + "\n".join(updates)
+
+    def _personas(self) -> list[dict]:
+        personas = list(ANALYST_PERSONAS)
+        if self._exp_memory is not None:
+            personas.extend(self._exp_memory.dynamic_personas)
+        return personas[:MAX_AGENTS_PER_SIM]
+
+    def _client_for_persona(self, idx: int) -> LLMClient:
+        return self._clients[idx % len(self._clients)]
+
+    def _persona_weight(self, persona_name: str) -> float:
+        if not PERSONA_WEIGHTING or self._exp_memory is None:
+            return 1.0
+        return self._exp_memory.persona_weight(persona_name)
+
+    def _weighted_mean(self, values: list[tuple[str, float]]) -> float:
+        if not values:
+            return 0.5
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for persona_name, value in values:
+            weight = self._persona_weight(persona_name)
+            weighted_sum += value * weight
+            total_weight += weight
+        return weighted_sum / total_weight if total_weight > 0 else sum(v for _, v in values) / len(values)
 
     def _extract_json(self, text: str) -> Optional[dict]:
         """Extract the first JSON object from a response (tolerates surrounding prose)."""
@@ -275,13 +298,12 @@ Respond ONLY with valid JSON — no prose before or after:
         target_date: str,
     ) -> list[WeatherScenario]:
         try:
-            resp = self._client.messages.create(
-                model=CLAUDE_MODEL,
+            text = self._client.text(
                 max_tokens=600,
                 system=self._morgan_system_prompt(forecast, bucket_low, bucket_high, target_date),
                 messages=[{"role": "user", "content": "Generate the scenarios now."}],
             )
-            scenarios = self._parse_scenarios(resp.content[0].text)
+            scenarios = self._parse_scenarios(text)
             if scenarios:
                 logger.info(
                     "Morgan → %d scenarios for %s: %s",
@@ -354,20 +376,19 @@ Respond ONLY with valid JSON:
         bucket_high: float,
         target_date: str,
     ) -> list[AgentTurn]:
-        personas = ANALYST_PERSONAS[:MAX_AGENTS_PER_SIM]
+        personas = self._personas()
         turns: list[AgentTurn] = []
-        for persona in personas:
+        for idx, persona in enumerate(personas):
             prompt = self._analyst_conditional_prompt(
                 persona, scenarios, forecast, bucket_low, bucket_high, target_date
             )
+            client = self._client_for_persona(idx)
             try:
-                resp = self._client.messages.create(
-                    model=CLAUDE_MODEL,
+                text = client.text(
                     max_tokens=500,
                     system=prompt,
                     messages=[{"role": "user", "content": "Provide your conditional probability estimates."}],
                 )
-                text = resp.content[0].text
             except Exception as exc:
                 logger.error("Analyst %s conditional call failed: %s", persona["name"], exc)
                 text = json.dumps({"conditional_probs": [0.5] * len(scenarios), "reasoning": "API error"})
@@ -382,6 +403,8 @@ Respond ONLY with valid JSON:
                 message=text,
                 probability_estimate=global_p,
                 conditional_probs=cond_probs,
+                provider=client.provider,
+                model=client.model,
             )
             turns.append(turn)
             logger.debug(
@@ -417,8 +440,12 @@ Respond ONLY with valid JSON:
         # Per-scenario mean across analysts
         scenario_means = []
         for i, s in enumerate(scenarios):
-            probs = [t.conditional_probs[i] for t in turns if t.conditional_probs and i < len(t.conditional_probs)]
-            mean = sum(probs) / len(probs) if probs else 0.5
+            probs = [
+                (t.agent_name, t.conditional_probs[i])
+                for t in turns
+                if t.conditional_probs and i < len(t.conditional_probs)
+            ]
+            mean = self._weighted_mean(probs) if probs else 0.5
             scenario_means.append(mean)
 
         contrib_lines = "\n".join(
@@ -465,15 +492,14 @@ Respond ONLY with valid JSON:
     ) -> tuple[str, float, str]:
         """Returns (confidence_level, adjusted_probability, reasoning)."""
         try:
-            resp = self._client.messages.create(
-                model=CLAUDE_MODEL,
+            text = self._client.text(
                 max_tokens=400,
                 system=self._river_system_prompt(
                     scenarios, turns, computed_p, forecast, bucket_low, bucket_high
                 ),
                 messages=[{"role": "user", "content": "Synthesise the forecast now."}],
             )
-            data = self._extract_json(resp.content[0].text)
+            data = self._extract_json(text)
             if data:
                 confidence = data.get("confidence", "medium")
                 if confidence not in ("high", "medium", "low"):
@@ -593,13 +619,13 @@ where p is YOUR probability estimate that the actual max temperature will fall i
         bucket_high: float,
         target_date: str,
     ) -> SimulationResult:
-        personas = ANALYST_PERSONAS[:MAX_AGENTS_PER_SIM]
+        personas = self._personas()
         turns: list[AgentTurn] = []
         histories: dict[str, list[dict]] = {p["name"]: [] for p in personas}
         debate_transcript: list[str] = []
 
         for round_num in range(1, self._sim_rounds + 1):
-            for persona in personas:
+            for idx, persona in enumerate(personas):
                 context_block = (
                     "\n\n--- Debate so far ---\n"
                     + "\n".join(debate_transcript[-8:])
@@ -610,16 +636,15 @@ where p is YOUR probability estimate that the actual max temperature will fall i
                     "role": "user",
                     "content": f"Round {round_num}. {context_block}",
                 })
+                client = self._client_for_persona(idx)
                 try:
-                    resp = self._client.messages.create(
-                        model=CLAUDE_MODEL,
+                    text = client.text(
                         max_tokens=400,
                         system=self._build_classic_system_prompt(
                             persona, forecast, bucket_low, bucket_high, target_date
                         ),
                         messages=histories[persona["name"]],
                     )
-                    text = resp.content[0].text
                 except Exception as exc:
                     logger.error("Agent %s round %d failed: %s", persona["name"], round_num, exc)
                     text = '{"p": 0.5}'
@@ -631,6 +656,8 @@ where p is YOUR probability estimate that the actual max temperature will fall i
                     round_num=round_num,
                     message=text,
                     probability_estimate=prob,
+                    provider=client.provider,
+                    model=client.model,
                 ))
                 debate_transcript.append(f"[{persona['name']} R{round_num}]: {text[:300]}")
                 logger.debug("  %s R%d → p=%.2f", persona["name"], round_num, prob or -1)
@@ -640,7 +667,12 @@ where p is YOUR probability estimate that the actual max temperature will fall i
             for t in turns
             if t.round_num == self._sim_rounds and t.probability_estimate is not None
         ]
-        consensus = sum(final_probs) / len(final_probs) if final_probs else 0.5
+        final_named_probs = [
+            (t.agent_name, t.probability_estimate)
+            for t in turns
+            if t.round_num == self._sim_rounds and t.probability_estimate is not None
+        ]
+        consensus = self._weighted_mean(final_named_probs) if final_named_probs else 0.5
         spread = (max(final_probs) - min(final_probs)) if len(final_probs) >= 2 else 1.0
         confidence = "high" if spread < 0.10 else ("medium" if spread < 0.25 else "low")
 

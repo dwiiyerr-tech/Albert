@@ -26,7 +26,7 @@ import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from config import (
     CITIES,
@@ -34,6 +34,10 @@ from config import (
     SIM_ROUNDS,
     HIGH_SPREAD_THRESHOLD_F,
     MAX_PARALLEL_CITIES,
+    DEFAULT_MODE,
+    SAVE_DEBATE_TRANSCRIPTS,
+    SELF_PLAY_REFLECTION,
+    DEMO_SYNTHETIC_MARKETS,
     POLYMARKET_API_KEY,
     POLYMARKET_PRIVATE_KEY,
     POLYMARKET_PROXY_ADDRESS,
@@ -41,17 +45,20 @@ from config import (
 )
 from utils import setup_logging
 from weather_data import fetch_city_forecast, CityForecast, get_historical_temp
-from simulation import WeatherSimulation, WeatherKnowledgeGraph, ReportGenerator
-from simulation.agents import SimulationResult
+from simulation.knowledge_graph import WeatherKnowledgeGraph
 from trading import EVCalculator, MarketScanner, PositionManager, TradeSignal, PolymarketOrderExecutor
 from learning import (
     ExperienceMemory,
-    SelfReflectionEngine,
     ProbabilityCalibrator,
     MarketPatternLearner,
 )
 
-# Demo session is optional; imported lazily to avoid patching anthropic too early
+if TYPE_CHECKING:
+    from learning.reflection import SelfReflectionEngine
+    from simulation.agents import SimulationResult, WeatherSimulation
+    from simulation.report_generator import ReportGenerator
+
+# Demo session is optional; imported lazily so token tracking can patch first.
 _DemoSession = None
 
 # City lookup: name → config dict (for lat/lon in historical temp)
@@ -75,7 +82,7 @@ class MiroWeatherAgent:
 
         # Core modules
         self.knowledge_graph = WeatherKnowledgeGraph()
-        self.reporter = ReportGenerator()
+        self.reporter: Optional[ReportGenerator] = None
         self.scanner = MarketScanner()
         positions_file = "positions_demo.json" if demo_session else "positions.json"
         self.positions = PositionManager(positions_file=positions_file)
@@ -84,10 +91,10 @@ class MiroWeatherAgent:
         self.memory = ExperienceMemory()
         self.calibrator = ProbabilityCalibrator(self.memory)
         self.market_learner = MarketPatternLearner(self.memory)
-        self.reflection = SelfReflectionEngine(self.memory)
+        self.reflection: Optional[SelfReflectionEngine] = None
 
         # Simulation + trading (learning-aware)
-        self.simulator = WeatherSimulation(experience_memory=self.memory)
+        self.simulator: Optional[WeatherSimulation] = None
         self.ev_calc = EVCalculator(
             calibrator=self.calibrator,
             market_learner=self.market_learner,
@@ -103,9 +110,9 @@ class MiroWeatherAgent:
                 host=POLYMARKET_BASE,
             )
             if not self.executor.is_configured():
-                logger.warning(
-                    "Live mode active but order executor is not configured — "
-                    "check POLYMARKET_PRIVATE_KEY and that py-clob-client is installed."
+                raise RuntimeError(
+                    "Live mode requires a configured Polymarket order executor. "
+                    "Set POLYMARKET_PRIVATE_KEY and install py-clob-client, or run without --live."
                 )
 
         # Seed knowledge graph with configured cities
@@ -129,9 +136,22 @@ class MiroWeatherAgent:
             "last_sim_result": {},   # city → scenario/confidence data from last sim
         }
 
+    def _ensure_llm_stack(self) -> None:
+        """Initialise LLM-backed components only for commands that need them."""
+        from learning.reflection import SelfReflectionEngine
+        from simulation.agents import WeatherSimulation
+        from simulation.report_generator import ReportGenerator
+
+        if self.reflection is None:
+            self.reflection = SelfReflectionEngine(self.memory)
+        if self.simulator is None:
+            self.simulator = WeatherSimulation(experience_memory=self.memory)
+        if self.reporter is None:
+            self.reporter = ReportGenerator()
+
     # ─── Learning pipeline ────────────────────────────────────────────────────
 
-    def _resolve_pending_predictions(self) -> int:
+    def _resolve_pending_predictions(self) -> tuple[int, set[str]]:
         """
         Check unresolved PredictionRecords and attempt to resolve them
         using historical temperature data.
@@ -143,10 +163,11 @@ class MiroWeatherAgent:
           has data to work with.
         - Calls validate_lesson() to close the lesson feedback loop.
         - Per-record try-except so one failure doesn't lose all progress.
-        Returns count of newly resolved predictions.
+        Returns count of newly resolved predictions and affected cities.
         """
         unresolved = self.memory.unresolved_records()
         newly_resolved = 0
+        resolved_cities: set[str] = set()
         today = datetime.date.today()
 
         for rec in unresolved:
@@ -215,16 +236,19 @@ class MiroWeatherAgent:
             rec_updated = self.memory.predictions[rec.id]
             city_resolved_count = len(self.memory.resolved_records(city=rec.city, last_n=200))
             if city_resolved_count >= 3:
+                self._ensure_llm_stack()
+                assert self.reflection is not None
                 new_lessons = self.reflection.post_trade_reflection(rec_updated)
                 if new_lessons:
                     logger.info("Post-trade reflection: %d new lessons from %s %s",
                                 len(new_lessons), rec.city, rec.target_date)
 
             newly_resolved += 1
+            resolved_cities.add(rec.city)
 
-        return newly_resolved
+        return newly_resolved, resolved_cities
 
-    def _run_learning_cycle(self, newly_resolved: int) -> None:
+    def _run_learning_cycle(self, newly_resolved: int, resolved_cities: set[str] | None = None) -> None:
         """
         Full learning update: calibration refit, market pattern analysis,
         batch reflection, and periodic persona evolution.
@@ -245,16 +269,17 @@ class MiroWeatherAgent:
         # Batch reflection every 10+ resolutions
         resolved_all = self.memory.resolved_records(last_n=100)
         if len(resolved_all) >= 10 and newly_resolved >= 3:
+            self._ensure_llm_stack()
+            assert self.reflection is not None
             lessons = self.reflection.batch_reflection(resolved_all)
             logger.info("Batch reflection: %d new lessons", len(lessons))
 
         # City-level batch reflection for cities with fresh data
-        cities_resolved: set[str] = {
-            r.city for r in self.memory.unresolved_records()
-        }  # approximate — cities with recent activity
-        for city in list(cities_resolved)[:5]:
+        for city in list(resolved_cities or set())[:5]:
             city_records = self.memory.resolved_records(city=city, last_n=30)
             if len(city_records) >= 5:
+                self._ensure_llm_stack()
+                assert self.reflection is not None
                 self.reflection.batch_reflection(city_records, city=city)
 
         # Persona evolution every PERSONA_EVOLUTION_INTERVAL resolutions
@@ -263,6 +288,8 @@ class MiroWeatherAgent:
         curr_milestone = (total_now // PERSONA_EVOLUTION_INTERVAL)
         if curr_milestone > prev_milestone:
             logger.info("Running persona evolution (milestone: %d resolutions)", total_now)
+            self._ensure_llm_stack()
+            assert self.reflection is not None
             self.reflection.evolve_personas()
 
         self._total_resolutions_processed = total_now
@@ -301,7 +328,28 @@ class MiroWeatherAgent:
             return
 
         high_disagreement = (forecast.model_spread_f or 0.0) > HIGH_SPREAD_THRESHOLD_F
-        markets = self.scanner.get_open_markets(city_name)
+        markets = self.scanner.get_open_markets(city_name, target_date=target_date)
+        if not markets and self._demo and DEMO_SYNTHETIC_MARKETS:
+            temp = forecast.consensus_temp_f
+            if temp is not None:
+                bucket_low = round(temp / 5) * 5 - 5
+                bucket_high = bucket_low + 10
+                markets = [{
+                    "market_id": f"demo:{city_name}:{target_str}:{bucket_low}:{bucket_high}",
+                    "no_token_id": f"demo-no:{city_name}:{target_str}:{bucket_low}:{bucket_high}",
+                    "question": (
+                        f"[DEMO SYNTHETIC] Will {city_name} high temperature "
+                        f"be {bucket_low:.0f}-{bucket_high:.0f}F on {target_str}?"
+                    ),
+                    "price_yes": 0.45,
+                    "price_no": 0.55,
+                    "spread": 0.01,
+                    "volume": 10_000.0,
+                    "hours_to_resolution": 24.0,
+                    "bucket_low": bucket_low,
+                    "bucket_high": bucket_high,
+                    "synthetic": True,
+                }]
 
         simulated_buckets: set[tuple] = set()
         city_sims: list = []
@@ -347,6 +395,7 @@ class MiroWeatherAgent:
                 volume=market["volume"],
                 spread=market["spread"],
                 no_token_id=market.get("no_token_id", ""),
+                market_price_no=market.get("price_no"),
             )
             if signal and signal.is_actionable:
                 city_signals.append(signal)
@@ -357,7 +406,8 @@ class MiroWeatherAgent:
                     signal.probability, signal.recommended_usd,
                 )
 
-        # Fallback simulation when no markets found
+        # Fallback simulation when no markets found. This is analysis-only and
+        # does not create market observations or tradeable signals.
         if not markets and forecast.consensus_temp_f is not None:
             temp = forecast.consensus_temp_f
             bucket_low = round(temp / 5) * 5 - 5
@@ -396,6 +446,11 @@ class MiroWeatherAgent:
                 )
 
             for sim, market in sim_market_pairs:
+                agent_estimates = {
+                    t.agent_name: t.probability_estimate
+                    for t in sim.turns
+                    if t.probability_estimate is not None
+                }
                 self.memory.record_prediction(
                     city=city_name,
                     target_date=target_str,
@@ -406,8 +461,9 @@ class MiroWeatherAgent:
                     model_spread_f=sim.model_spread_f,
                     agent_probabilities=[
                         t.probability_estimate for t in sim.turns
-                        if t.round_num == SIM_ROUNDS and t.probability_estimate is not None
+                        if t.probability_estimate is not None
                     ],
+                    agent_estimates=agent_estimates,
                     market_price=market["price_yes"],
                     market_volume=market["volume"],
                     hours_to_resolution=market["hours_to_resolution"],
@@ -416,6 +472,38 @@ class MiroWeatherAgent:
                     gfs_f=forecast.gfs.temp_f if forecast.gfs else None,
                     metar_f=forecast.metar.temp_f if forecast.metar else None,
                 )
+
+            if SAVE_DEBATE_TRANSCRIPTS:
+                for sim in city_sims:
+                    self.memory.record_debate_transcript(
+                        city=sim.city,
+                        target_date=sim.target_date,
+                        bucket_low=sim.bucket_low,
+                        bucket_high=sim.bucket_high,
+                        consensus_probability=sim.consensus_probability,
+                        confidence_level=sim.confidence_level,
+                        turns=[
+                            {
+                                "agent_name": t.agent_name,
+                                "round_num": t.round_num,
+                                "message": t.message,
+                                "probability_estimate": t.probability_estimate,
+                                "conditional_probs": t.conditional_probs,
+                                "provider": t.provider,
+                                "model": t.model,
+                            }
+                            for t in sim.turns
+                        ],
+                        scenarios=[
+                            {
+                                "name": s.name,
+                                "probability": s.probability,
+                                "expected_temp_f": s.expected_temp_f,
+                                "description": s.description,
+                            }
+                            for s in sim.scenarios
+                        ],
+                    )
 
     def run_cycle(self, days_ahead: int = 1) -> list[TradeSignal]:
         """
@@ -440,16 +528,19 @@ class MiroWeatherAgent:
                     len(self.memory.resolved_records()))
 
         # ── Step 0: Resolve past predictions and learn from them ──────────────
-        newly_resolved = self._resolve_pending_predictions()
+        newly_resolved, resolved_cities = self._resolve_pending_predictions()
         if newly_resolved:
-            self._run_learning_cycle(newly_resolved)
+            self._run_learning_cycle(newly_resolved, resolved_cities)
             self.memory.save()
 
         # ── Step 1–7: Parallel city analysis ──────────────────────────────────
         # All 20 cities run concurrently (bounded by MAX_PARALLEL_CITIES).
-        # Phase-1 work (HTTP + Claude API) is fully parallel; state writes are
+        # Phase-1 work (HTTP + LLM API) is fully parallel; state writes are
         # serialised under a lock in Phase 2 inside _process_city().
         lock = threading.Lock()
+        self._ensure_llm_stack()
+        assert self.simulator is not None
+        assert self.reporter is not None
 
         def _run_city(city_cfg: dict) -> None:
             city_name = city_cfg["name"]
@@ -528,15 +619,20 @@ class MiroWeatherAgent:
                     logger.debug("Already open: %s — skipping", signal.market_id)
                     continue
 
-                order_id: Optional[str] = None
-                if self.executor and self.executor.is_configured():
-                    order_id = self.executor.place_order(signal)
-                    if order_id is None:
-                        logger.warning(
-                            "LIVE: order submission failed for %s %s — position not opened",
-                            signal.direction, signal.city,
-                        )
-                        continue
+                if not self.executor or not self.executor.is_configured():
+                    logger.error(
+                        "LIVE: order executor unavailable for %s %s — position not opened",
+                        signal.direction, signal.city,
+                    )
+                    continue
+
+                order_id = self.executor.place_order(signal)
+                if order_id is None:
+                    logger.warning(
+                        "LIVE: order submission failed for %s %s — position not opened",
+                        signal.direction, signal.city,
+                    )
+                    continue
 
                 self.positions.open_position(
                     market_id=signal.market_id,
@@ -572,6 +668,11 @@ class MiroWeatherAgent:
                     print(f"\n── Detailed Report: {sim.city} {sim.target_date} ──")
                     print(self.reporter.generate(sim))
 
+        if SELF_PLAY_REFLECTION and self.reflection is not None:
+            lessons = self.reflection.self_play_reflection()
+            if lessons:
+                logger.info("Self-play reflection: %d new lessons/personas", len(lessons))
+
         # ── Persist all state ─────────────────────────────────────────────────
         self.memory.save()
         self.knowledge_graph.save()
@@ -595,6 +696,20 @@ class MiroWeatherAgent:
         for lesson in sorted(self.memory.lessons, key=lambda l: -l.reliability_score)[:10]:
             rel = f"{lesson.reliability_score:.0%}" if (lesson.times_validated + lesson.times_violated) > 0 else "new"
             print(f"  [{lesson.category}] ({rel}) {lesson.content[:90]}")
+        print("╠══════ Persona Scores ═══════════════════╣")
+        scores = self.memory.persona_score_report()
+        if scores:
+            for row in scores[:10]:
+                print(
+                    f"  {row['name'][:24]:<24} "
+                    f"n={row['predictions']:<4} brier={row['avg_brier']} weight={row['weight']}"
+                )
+        else:
+            print("  No resolved persona scores yet")
+        if self.memory.dynamic_personas:
+            print("╠══════ Dynamic Personas ═════════════════╣")
+            for persona in self.memory.dynamic_personas:
+                print(f"  {persona.get('name')}: {persona.get('bias', '')[:80]}")
         print("╚═════════════════════════════════════════╝")
 
     def show_positions(self) -> None:
@@ -641,6 +756,9 @@ class MiroWeatherAgent:
         """
         if self._demo is None:
             raise RuntimeError("run_demo() requires a DemoSession — pass demo_session= to __init__")
+
+        self._ensure_llm_stack()
+        assert self.simulator is not None
 
         demo = self._demo
         interval = demo.cycle_interval_seconds
@@ -729,6 +847,8 @@ def main() -> None:
     )
     parser.add_argument("--run", action="store_true",
                         help="Run one analysis + learning cycle and exit")
+    parser.add_argument("--dry", action="store_true",
+                        help="Force dry-run mode for --run/--daemon, ignoring DEFAULT_MODE")
     parser.add_argument("--daemon", action="store_true",
                         help="Run continuously every hour")
     parser.add_argument("--positions", action="store_true",
@@ -769,8 +889,30 @@ def main() -> None:
         run_wizard()
         return
 
+    explicit_mode = args.demo or args.live or args.dry
+    has_run_command = any([
+        args.run,
+        args.daemon,
+        args.tui,
+        args.positions,
+        args.learning_status,
+        args.reflect,
+    ])
+    if has_run_command and not explicit_mode:
+        if DEFAULT_MODE == "demo" and (args.run or args.daemon):
+            args.demo = True
+            if args.daemon:
+                logger.warning("DEFAULT_MODE=demo uses demo cycles instead of daemon mode")
+                args.daemon = False
+                args.run = True
+        elif DEFAULT_MODE == "live" and (args.run or args.daemon or args.tui):
+            args.live = True
+    if args.dry:
+        args.demo = False
+        args.live = False
+
     if args.demo:
-        # Demo must patch anthropic BEFORE MiroWeatherAgent is instantiated
+        # Demo must patch LLMClient before MiroWeatherAgent creates LLM clients.
         from demo.session import DemoSession
         session = DemoSession(
             virtual_balance=args.demo_balance,
@@ -780,6 +922,8 @@ def main() -> None:
         )
         session.install_token_tracking()
         agent = MiroWeatherAgent(dry_run=False, demo_session=session)
+        agent._ensure_llm_stack()
+        assert agent.simulator is not None
         # Override sim rounds to save tokens
         agent.simulator._sim_rounds = args.demo_sim_rounds
         agent.run_demo(days_ahead=args.days_ahead)
@@ -794,6 +938,8 @@ def main() -> None:
     elif args.learning_status:
         agent.show_learning_status()
     elif args.reflect:
+        agent._ensure_llm_stack()
+        assert agent.reflection is not None
         resolved = agent.memory.resolved_records(last_n=100)
         lessons = agent.reflection.batch_reflection(resolved)
         print(f"Reflection complete: {len(lessons)} new lessons extracted")

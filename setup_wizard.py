@@ -10,19 +10,67 @@ import os
 import sys
 from pathlib import Path
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+except ModuleNotFoundError:
+    import re
+
+    def _plain(markup: object) -> str:
+        return re.sub(r"\[/?[^\]]+\]", "", str(markup))
+
+    class Console:
+        def print(self, *objects, **kwargs) -> None:
+            print(*(_plain(obj) for obj in objects))
+
+        def input(self, prompt: str = "") -> str:
+            return input(_plain(prompt))
+
+        def rule(self, title: str = "") -> None:
+            clean = _plain(title)
+            print(f"\n{'-' * 8} {clean} {'-' * 8}")
+
+    class Panel:
+        def __init__(self, renderable, *args, title: str = "", **kwargs) -> None:
+            self.renderable = renderable
+            self.title = title
+
+        def __str__(self) -> str:
+            title = _plain(self.title)
+            body = _plain(self.renderable)
+            return f"{title}\n{body}" if title else body
+
+    class Table:
+        def __init__(self, *args, **kwargs) -> None:
+            self._rows: list[tuple[str, ...]] = []
+
+        def add_column(self, *args, **kwargs) -> None:
+            return None
+
+        def add_row(self, *values) -> None:
+            self._rows.append(tuple(_plain(v) for v in values))
+
+        def __str__(self) -> str:
+            return "\n".join("  ".join(row) for row in self._rows)
+
+    class Text:
+        @staticmethod
+        def from_markup(markup: str):
+            return _plain(markup)
 
 console = Console()
 
 _ENV_PATH = Path(__file__).parent / ".env"
 
-# ─── Available Claude models ──────────────────────────────────────────────────
+# ─── Available LLM models ─────────────────────────────────────────────────────
 
-_CLAUDE_MODELS = [
+_LLM_MODELS = [
     ("claude-sonnet-4-6",  "Sonnet 4.6  — fast, capable, cost-effective  (recommended)"),
+    ("gpt-4.1",            "OpenAI GPT-4.1 — OpenAI-compatible APIs"),
+    ("deepseek-chat",      "DeepSeek Chat — OpenAI-compatible APIs"),
+    ("openrouter/auto",    "OpenRouter Auto — route to an available model"),
     ("claude-opus-4-7",    "Opus 4.7    — most capable, slower, higher cost"),
     ("claude-haiku-4-5",   "Haiku 4.5   — fastest, lowest cost, lighter analysis"),
     ("custom",             "Custom      — enter your own model ID"),
@@ -185,8 +233,10 @@ def _read_existing_env() -> dict[str, str]:
 
 def _save_env(settings: dict[str, str]) -> None:
     sections = [
-        ("# ─── LLM / Claude API ────────────────────────────────────────────────────",
-         ["ANTHROPIC_API_KEY", "CLAUDE_MODEL", "ANTHROPIC_BASE_URL"]),
+        ("# ─── LLM API ─────────────────────────────────────────────────────────────",
+         ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL",
+          "LLM_ENSEMBLE",
+          "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "ANTHROPIC_BASE_URL"]),
         ("# ─── Polymarket Wallet ───────────────────────────────────────────────────",
          ["POLYMARKET_API_KEY", "POLYMARKET_PRIVATE_KEY", "POLYMARKET_PROXY_ADDRESS"]),
         ("# ─── Weather Data ────────────────────────────────────────────────────────",
@@ -199,6 +249,7 @@ def _save_env(settings: dict[str, str]) -> None:
          ["MIN_VOLUME", "MAX_SPREAD", "MIN_HOURS_TO_RESOLUTION", "MAX_HOURS_TO_RESOLUTION"]),
         ("# ─── Simulation Settings ─────────────────────────────────────────────────",
          ["SIM_ROUNDS", "SCENARIO_SPECULATION", "HIGH_SPREAD_THRESHOLD_F",
+          "PERSONA_WEIGHTING", "SAVE_DEBATE_TRANSCRIPTS", "SELF_PLAY_REFLECTION",
           "UPDATE_INTERVAL_SECONDS", "CONSENSUS_THRESHOLD"]),
     ]
 
@@ -220,56 +271,87 @@ def _save_env(settings: dict[str, str]) -> None:
 # ─── Wizard steps ─────────────────────────────────────────────────────────────
 
 def _step_llm(existing: dict, settings: dict, step: int, total: int) -> None:
-    _header(step, total, "LLM / Claude API")
+    _header(step, total, "LLM API")
 
-    # Anthropic API key
-    existing_ak = existing.get("ANTHROPIC_API_KEY", "")
-    console.print("  [bold]ANTHROPIC_API_KEY[/] [red](required)[/]")
-    if existing_ak:
-        console.print(f"  [dim]Current: {_mask(existing_ak)}[/]")
-    ak = _prompt_secret("  Enter key", required=not existing_ak, current=existing_ak)
-    settings["ANTHROPIC_API_KEY"] = ak or existing_ak
+    current_provider = existing.get("LLM_PROVIDER", "anthropic")
+    provider = _prompt_choice(
+        "LLM provider:",
+        [
+            ("anthropic", "Native Anthropic Messages API"),
+            ("openai-compatible", "OpenAI-compatible /chat/completions API"),
+            ("mock", "Offline deterministic responses for smoke tests only"),
+        ],
+        default=current_provider if current_provider in {"anthropic", "openai-compatible", "mock"} else "anthropic",
+    )
+    settings["LLM_PROVIDER"] = provider
 
-    # Claude model
     console.print()
-    current_model = existing.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    existing_key = existing.get("LLM_API_KEY") or existing.get("ANTHROPIC_API_KEY") or existing.get("OPENAI_API_KEY", "")
+    if provider == "mock":
+        settings["LLM_API_KEY"] = ""
+    else:
+        console.print("  [bold]LLM_API_KEY[/] [red](required)[/]")
+        if existing_key:
+            console.print(f"  [dim]Current: {_mask(existing_key)}[/]")
+        key = _prompt_secret("  Enter key", required=not existing_key, current=existing_key)
+        settings["LLM_API_KEY"] = key or existing_key
+
+    console.print()
+    current_model = existing.get("LLM_MODEL") or existing.get("CLAUDE_MODEL", "claude-sonnet-4-6")
     choice = _prompt_choice(
-        "Claude model to use for all agents:",
-        _CLAUDE_MODELS,
-        default=current_model if current_model in dict(_CLAUDE_MODELS) else "custom",
+        "Model to use for all agents:",
+        _LLM_MODELS,
+        default=current_model if current_model in dict(_LLM_MODELS) else "custom",
     )
     if choice == "custom":
         model = _prompt_str(
             "  Model ID",
             default=current_model,
             required=True,
-            description="Enter the exact model ID (e.g. claude-opus-4-7).",
+            description="Enter the exact model ID required by your provider.",
         )
     else:
         model = choice
-    settings["CLAUDE_MODEL"] = model
+    settings["LLM_MODEL"] = model
 
-    # Custom base URL
     console.print()
-    existing_url = existing.get("ANTHROPIC_BASE_URL", "")
-    use_custom_url = _prompt_bool(
-        "Use a custom API base URL?",
-        default=bool(existing_url),
-        description="Enable this for API-compatible proxies, AWS Bedrock gateways, or private deployments.",
-    )
-    if use_custom_url:
+    existing_url = existing.get("LLM_BASE_URL") or existing.get("ANTHROPIC_BASE_URL", "")
+    if provider == "mock":
+        settings["LLM_BASE_URL"] = ""
+    elif provider == "openai-compatible":
         url = _prompt_str(
-            "  ANTHROPIC_BASE_URL",
-            default=existing_url,
+            "  LLM_BASE_URL",
+            default=existing_url or "https://api.openai.com/v1",
             required=True,
-            description="Full base URL, e.g. https://my-proxy.example.com/v1",
+            description="Base URL ending before /chat/completions, e.g. https://api.openai.com/v1",
         )
-        settings["ANTHROPIC_BASE_URL"] = url
+        settings["LLM_BASE_URL"] = url.rstrip("/")
         console.print(f"  [dim]Requests will go to: {url}[/]")
     else:
-        settings["ANTHROPIC_BASE_URL"] = ""
-        if existing_url:
-            console.print("  [dim]Custom base URL cleared — will use default Anthropic endpoint.[/]")
+        use_custom_url = _prompt_bool(
+            "Use a custom Anthropic base URL?",
+            default=bool(existing_url),
+            description="Enable this for Anthropic-compatible proxies or private deployments.",
+        )
+        settings["LLM_BASE_URL"] = (
+            _prompt_str("  LLM_BASE_URL", default=existing_url, required=True)
+            if use_custom_url else ""
+        )
+
+    # Backward-compatible aliases for older scripts.
+    if provider == "anthropic":
+        settings["ANTHROPIC_API_KEY"] = settings["LLM_API_KEY"]
+        settings["CLAUDE_MODEL"] = settings["LLM_MODEL"]
+        settings["ANTHROPIC_BASE_URL"] = settings["LLM_BASE_URL"]
+
+    console.print()
+    ensemble = _prompt_str(
+        "  LLM_ENSEMBLE",
+        default=existing.get("LLM_ENSEMBLE", ""),
+        required=False,
+        description="Optional comma-separated provider:model:base_url list for multi-provider persona ensemble.",
+    )
+    settings["LLM_ENSEMBLE"] = ensemble
 
 
 def _step_wallet(existing: dict, settings: dict, step: int, total: int) -> None:
@@ -436,6 +518,24 @@ def _step_simulation(existing: dict, settings: dict, step: int, total: int) -> N
     )
     settings["SCENARIO_SPECULATION"] = "true" if scenario else "false"
     console.print()
+    settings["PERSONA_WEIGHTING"] = "true" if _prompt_bool(
+        "PERSONA_WEIGHTING",
+        default=existing.get("PERSONA_WEIGHTING", "true").lower() != "false",
+        description="Weight analyst votes by historical Brier score once outcomes resolve.",
+    ) else "false"
+    console.print()
+    settings["SAVE_DEBATE_TRANSCRIPTS"] = "true" if _prompt_bool(
+        "SAVE_DEBATE_TRANSCRIPTS",
+        default=existing.get("SAVE_DEBATE_TRANSCRIPTS", "true").lower() != "false",
+        description="Persist full multi-agent debate transcripts for audit and self-play.",
+    ) else "false"
+    console.print()
+    settings["SELF_PLAY_REFLECTION"] = "true" if _prompt_bool(
+        "SELF_PLAY_REFLECTION",
+        default=existing.get("SELF_PLAY_REFLECTION", "true").lower() != "false",
+        description="Run MiroFish-style reflection over recent debate transcripts.",
+    ) else "false"
+    console.print()
     settings["HIGH_SPREAD_THRESHOLD_F"] = str(_prompt_float(
         "HIGH_SPREAD_THRESHOLD_F",
         default=float(existing.get("HIGH_SPREAD_THRESHOLD_F", "8.0")),
@@ -462,7 +562,7 @@ def _step_review(settings: dict, step: int, total: int) -> bool:
     _header(step, total, "Review & Save")
 
     # Sensitive keys — shown masked; everything else shown plainly
-    _SECRET_KEYS = {"ANTHROPIC_API_KEY", "POLYMARKET_API_KEY",
+    _SECRET_KEYS = {"LLM_API_KEY", "ANTHROPIC_API_KEY", "POLYMARKET_API_KEY",
                     "POLYMARKET_PRIVATE_KEY", "VISUAL_CROSSING_API_KEY"}
 
     table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
@@ -470,14 +570,16 @@ def _step_review(settings: dict, step: int, total: int) -> bool:
     table.add_column("Value", style="green")
 
     display_sections = {
-        "LLM / Claude API":  ["ANTHROPIC_API_KEY", "CLAUDE_MODEL", "ANTHROPIC_BASE_URL"],
+        "LLM API":           ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL", "LLM_ENSEMBLE"],
         "Polymarket Wallet":  ["POLYMARKET_API_KEY", "POLYMARKET_PRIVATE_KEY", "POLYMARKET_PROXY_ADDRESS"],
         "Weather Data":       ["VISUAL_CROSSING_API_KEY"],
         "Trading Mode":       ["DEFAULT_MODE"],
         "Risk Parameters":    ["MIN_EV", "KELLY_FRACTION", "MAX_TRADE_SIZE_USD", "STOP_LOSS_PCT", "TRAILING_STOP_TRIGGER"],
         "Market Filters":     ["MIN_VOLUME", "MAX_SPREAD", "MIN_HOURS_TO_RESOLUTION", "MAX_HOURS_TO_RESOLUTION"],
         "Simulation":         ["SIM_ROUNDS", "SCENARIO_SPECULATION", "HIGH_SPREAD_THRESHOLD_F",
-                               "UPDATE_INTERVAL_SECONDS", "CONSENSUS_THRESHOLD"],
+                               "PERSONA_WEIGHTING", "SAVE_DEBATE_TRANSCRIPTS",
+                               "SELF_PLAY_REFLECTION", "UPDATE_INTERVAL_SECONDS",
+                               "CONSENSUS_THRESHOLD"],
     }
 
     for section, keys in display_sections.items():

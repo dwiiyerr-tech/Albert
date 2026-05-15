@@ -10,6 +10,7 @@ market inefficiencies before EV is computed.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -24,11 +25,13 @@ from config import (
     MAX_HOURS_TO_RESOLUTION,
     CONSENSUS_THRESHOLD,
 )
-from simulation.agents import SimulationResult
 
 if TYPE_CHECKING:
     from learning.calibration import ProbabilityCalibrator
     from learning.market_learner import MarketPatternLearner
+    from simulation.agents import SimulationResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -155,6 +158,7 @@ class EVCalculator:
         volume: float,
         spread: float,
         no_token_id: str = "",
+        market_price_no: float | None = None,
     ) -> Optional[TradeSignal]:
         """
         Generate a TradeSignal from a SimulationResult and live market data.
@@ -184,7 +188,8 @@ class EVCalculator:
 
         # Try both YES and NO directions
         ev_yes = self.compute_ev(p_yes, market_price)
-        ev_no = self.compute_ev(1 - p_yes, 1 - market_price)
+        no_price = market_price_no if market_price_no is not None else 1 - market_price
+        ev_no = self.compute_ev(1 - p_yes, no_price)
 
         if ev_yes >= ev_no and ev_yes >= 0:
             direction = "YES"
@@ -195,7 +200,7 @@ class EVCalculator:
             direction = "NO"
             ev = ev_no
             probability = 1 - p_yes
-            price = 1 - market_price
+            price = no_price
         else:
             return None  # no positive EV on either side
 

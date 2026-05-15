@@ -1,7 +1,7 @@
 """
 Self-Reflection Engine — the "learning brain" of MiroWeather.
 
-After markets resolve, this engine sends the full prediction history to Claude,
+After markets resolve, this engine sends the full prediction history to the configured LLM,
 which analyzes mistakes, identifies patterns, extracts actionable lessons, and
 rewrites agent persona biases. Every lesson is stored in ExperienceMemory and
 automatically injected into future simulation debates.
@@ -16,9 +16,7 @@ import logging
 import uuid
 from typing import Optional
 
-import anthropic
-
-from config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_MODEL
+from llm_client import LLMClient
 from learning.memory import ExperienceMemory, Lesson, PredictionRecord
 
 logger = logging.getLogger(__name__)
@@ -26,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class SelfReflectionEngine:
     """
-    Uses Claude to analyze prediction errors and extract structured lessons.
+    Uses the configured LLM to analyze prediction errors and extract structured lessons.
     Operates in three modes:
       1. post_trade_reflection   — analyze a single resolved trade
       2. batch_reflection        — analyze a batch of recent resolved predictions
@@ -34,10 +32,7 @@ class SelfReflectionEngine:
     """
 
     def __init__(self, memory: ExperienceMemory) -> None:
-        self._client = anthropic.Anthropic(
-            api_key=ANTHROPIC_API_KEY,
-            **({"base_url": ANTHROPIC_BASE_URL} if ANTHROPIC_BASE_URL else {}),
-        )
+        self._client = LLMClient()
         self._memory = memory
 
     # ─── Tool definitions ─────────────────────────────────────────────────────
@@ -129,6 +124,20 @@ class SelfReflectionEngine:
                 "required": ["description", "actionable_rule"],
             },
         },
+        {
+            "name": "create_dynamic_persona",
+            "description": "Create a new analyst persona to cover a missing forecasting perspective.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "bias": {"type": "string"},
+                    "style": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["name", "bias", "style", "rationale"],
+            },
+        },
     ]
 
     # ─── Tool dispatch ────────────────────────────────────────────────────────
@@ -186,6 +195,28 @@ class SelfReflectionEngine:
             new_lessons.append(lesson)
             return json.dumps({"status": "flagged"}), new_lessons
 
+        elif name == "create_dynamic_persona":
+            persona = {
+                "name": inputs["name"],
+                "bias": inputs["bias"],
+                "style": inputs["style"],
+            }
+            self._memory.add_dynamic_persona(persona)
+            lesson = Lesson(
+                id=str(uuid.uuid4()),
+                category="agent_calibration",
+                city=None,
+                content=(
+                    f"[dynamic persona created] {inputs['name']}: "
+                    f"{inputs['rationale']}"
+                ),
+                confidence=0.65,
+                supporting_records=record_ids,
+            )
+            self._memory.add_lesson(lesson)
+            new_lessons.append(lesson)
+            return json.dumps({"status": "persona_created", "name": inputs["name"]}), new_lessons
+
         return json.dumps({"error": f"unknown tool {name}"}), []
 
     # ─── Reflection methods ───────────────────────────────────────────────────
@@ -200,6 +231,7 @@ class SelfReflectionEngine:
         error = record.prediction_error
         error_str = f"{error:+.3f}" if error is not None else "N/A"
         brier = record.brier_score
+        brier_str = f"{brier:.4f}" if brier is not None else "N/A"
         bucket = f"{record.bucket_low}°F–{record.bucket_high}°F"
         actual = f"{record.actual_temp_f:.1f}°F" if record.actual_temp_f else "unknown"
 
@@ -215,7 +247,7 @@ Our predicted P(YES): {record.consensus_probability:.3f}
 Outcome: {"YES resolved ✓" if record.outcome_yes else "NO resolved ✗"}
 Actual temperature: {actual}
 Prediction error: {error_str}  (positive = we overestimated YES)
-Brier score: {brier:.4f if brier else "N/A"}
+Brier score: {brier_str}
 
 Model forecasts at prediction time:
   ECMWF: {f"{record.ecmwf_f:.1f}°F" if record.ecmwf_f else "N/A"}
@@ -332,63 +364,75 @@ Be specific: "When [condition], reduce probability estimate by [amount]" rather 
 """
         return self._run_reflection_loop(prompt, [])
 
+    def self_play_reflection(self, max_transcripts: int = 12) -> list[Lesson]:
+        """
+        MiroFish-style self-play: review recent debate transcripts, critique
+        reasoning diversity, and create lessons/personas for missing viewpoints.
+        """
+        transcripts = self._memory.debate_transcripts[-max_transcripts:]
+        if not transcripts:
+            return []
+
+        compact = []
+        for t in transcripts:
+            compact.append({
+                "city": t.city,
+                "target_date": t.target_date,
+                "bucket": [t.bucket_low, t.bucket_high],
+                "consensus_probability": t.consensus_probability,
+                "confidence": t.confidence_level,
+                "agents": [
+                    {
+                        "name": turn.get("agent_name"),
+                        "p": turn.get("probability_estimate"),
+                        "provider": turn.get("provider"),
+                        "model": turn.get("model"),
+                        "message_excerpt": str(turn.get("message", ""))[:300],
+                    }
+                    for turn in t.turns[-8:]
+                ],
+            })
+
+        prompt = f"""You are MiroFish's self-play referee for a weather-trading agent.
+
+Review these recent debate transcripts and persona performance scores. Find:
+1. Repeated reasoning blind spots.
+2. Missing analyst perspectives that would improve future debates.
+3. Persona calibration updates.
+4. Any evidence that one provider/model is producing shallow or redundant reasoning.
+
+Use store_lesson, update_persona_bias, or create_dynamic_persona.
+Create at most one new persona, and only if it adds a genuinely distinct viewpoint.
+
+=== PERSONA PERFORMANCE ===
+{json.dumps(self._memory.persona_score_report(), indent=2)}
+
+=== RECENT DEBATES ===
+{json.dumps(compact, indent=2)}
+"""
+        return self._run_reflection_loop(prompt, [])
+
     # ─── Internal ─────────────────────────────────────────────────────────────
 
     def _run_reflection_loop(self, prompt: str, record_ids: list[str]) -> list[Lesson]:
-        messages = [{"role": "user", "content": prompt}]
         all_lessons: list[Lesson] = []
 
-        for _ in range(6):  # max tool rounds
+        try:
+            tool_calls = self._client.tool_calls(
+                prompt=prompt,
+                tools=self._TOOLS,
+                max_tokens=2048,
+            )
+        except Exception as exc:
+            logger.error("Reflection API call failed: %s", exc)
+            return []
+
+        for call in tool_calls:
             try:
-                response = self._client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=2048,
-                    tools=self._TOOLS,
-                    messages=messages,
-                )
+                _, new_lessons = self._dispatch_tool(call.name, call.input, record_ids)
+                all_lessons.extend(new_lessons)
             except Exception as exc:
-                logger.error("Reflection API call failed: %s", exc)
-                break
-
-            messages.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason in ("end_turn", "max_tokens"):
-                # max_tokens: Claude hit token limit — extract any tool calls already in response
-                if response.stop_reason == "max_tokens":
-                    logger.warning("Reflection hit max_tokens — extracting partial tool results")
-                    for block in response.content:
-                        if hasattr(block, "type") and block.type == "tool_use":
-                            try:
-                                _, new_lessons = self._dispatch_tool(
-                                    block.name, block.input, record_ids
-                                )
-                                all_lessons.extend(new_lessons)
-                            except Exception as exc:
-                                logger.warning("Partial tool dispatch failed: %s", exc)
-                break
-
-            if response.stop_reason == "tool_use":
-                tool_results = []
-                for block in response.content:
-                    if hasattr(block, "type") and block.type == "tool_use":
-                        try:
-                            result_str, new_lessons = self._dispatch_tool(
-                                block.name, block.input, record_ids
-                            )
-                            all_lessons.extend(new_lessons)
-                        except Exception as exc:
-                            logger.warning("Tool dispatch error (%s): %s", block.name, exc)
-                            result_str = json.dumps({"error": str(exc)})
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result_str,
-                        })
-                if tool_results:
-                    messages.append({"role": "user", "content": tool_results})
-            else:
-                logger.debug("Reflection loop ended with stop_reason=%s", response.stop_reason)
-                break
+                logger.warning("Tool dispatch error (%s): %s", call.name, exc)
 
         return all_lessons
 

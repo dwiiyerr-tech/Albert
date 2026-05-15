@@ -9,6 +9,7 @@ Execution upgrades:
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import threading
 import time
@@ -17,7 +18,12 @@ from typing import Optional
 
 import requests
 
-from config import POLYMARKET_BASE, POLYMARKET_GAMMA, MAX_PARALLEL_ORDERBOOKS
+from config import (
+    MARKET_SCANNER_DEBUG,
+    POLYMARKET_BASE,
+    POLYMARKET_GAMMA,
+    MAX_PARALLEL_ORDERBOOKS,
+)
 from weather_data import parse_temp_range
 
 logger = logging.getLogger(__name__)
@@ -69,9 +75,53 @@ class MarketScanner:
             logger.warning("Polymarket request failed: %s | %s", url, exc)
             return None
 
+    def _book_prices(self, token_id: str) -> Optional[dict]:
+        ob = self._get(f"{POLYMARKET_BASE}/book", params={"token_id": token_id})
+        if not ob:
+            return None
+        try:
+            asks = ob.get("asks") or []
+            bids = ob.get("bids") or []
+            best_ask = min(float(a.get("price", 1.0)) for a in asks) if asks else 1.0
+            best_bid = max(float(b.get("price", 0.0)) for b in bids) if bids else 0.0
+            spread = best_ask - best_bid
+            if spread < 0:
+                return None
+            return {
+                "best_ask": max(0.01, min(0.99, best_ask)),
+                "best_bid": max(0.01, min(0.99, best_bid)),
+                "mid": max(0.01, min(0.99, (best_ask + best_bid) / 2)),
+                "spread": spread,
+            }
+        except (ValueError, TypeError) as exc:
+            logger.debug("Order book parse failed: %s", exc)
+            return None
+
     def _is_weather_market(self, title: str) -> bool:
         title_lower = title.lower()
         return any(kw in title_lower for kw in self._WEATHER_KEYWORDS)
+
+    def _coerce_list(self, value) -> list:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                return []
+        return []
+
+    def _market_end_date(self, market: dict) -> Optional[datetime.date]:
+        end_date = market.get("endDate") or market.get("endDateIso") or market.get("end_date_iso")
+        if not end_date:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(
+                str(end_date).replace("Z", "+00:00")
+            ).date()
+        except Exception:
+            return None
 
     def _hours_until_resolution(self, end_date_iso: str) -> float:
         try:
@@ -93,28 +143,32 @@ class MarketScanner:
         if not bucket:
             return None
 
-        clob_token_ids = market.get("clobTokenIds", [""])
+        if market.get("closed") is True or market.get("active") is False:
+            return None
+        if market.get("enableOrderBook") is False:
+            return None
+
+        clob_token_ids = self._coerce_list(market.get("clobTokenIds", [""]))
         clob_token_id = clob_token_ids[0] if clob_token_ids else ""
         no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else ""
         if not clob_token_id:
             return None
 
-        ob = self._get(f"{POLYMARKET_BASE}/book", params={"token_id": clob_token_id})
-        if not ob:
+        yes_book = self._book_prices(clob_token_id)
+        if not yes_book:
             return None
+        no_book = self._book_prices(no_token_id) if no_token_id else None
 
         try:
-            asks = ob.get("asks") or []
-            bids = ob.get("bids") or []
-            best_ask = float(asks[0].get("price", 1.0)) if asks else 1.0
-            best_bid = float(bids[0].get("price", 0.0)) if bids else 0.0
-            spread = best_ask - best_bid
-            if spread < 0:
-                return None
-            mid = max(0.01, min(0.99, (best_ask + best_bid) / 2))
+            price_yes = yes_book["best_ask"]
+            price_no = no_book["best_ask"] if no_book else max(
+                0.01,
+                min(0.99, 1 - yes_book["best_bid"]),
+            )
+            spread = max(yes_book["spread"], no_book["spread"] if no_book else yes_book["spread"])
             volume = float(market.get("volume", 0))
             hours = self._hours_until_resolution(market.get("endDate", ""))
-        except (ValueError, TypeError, IndexError) as exc:
+        except (ValueError, TypeError, IndexError, KeyError) as exc:
             logger.debug("Order book parse failed: %s", exc)
             return None
 
@@ -126,8 +180,10 @@ class MarketScanner:
             "market_id": clob_token_id,    # CLOB YES token ID for OrderArgs
             "no_token_id": no_token_id,     # CLOB NO token ID
             "question": question,
-            "price_yes": mid,
-            "price_no": 1 - mid,
+            "price_yes": price_yes,
+            "price_no": price_no,
+            "mid_yes": yes_book["mid"],
+            "best_bid_yes": yes_book["best_bid"],
             "spread": spread,
             "volume": volume,
             "hours_to_resolution": hours,
@@ -135,7 +191,56 @@ class MarketScanner:
             "bucket_high": b_high,
         }
 
-    def get_open_markets(self, city_name: str) -> list[dict]:
+    def _candidate_markets_from_public_search(
+        self,
+        city_name: str,
+        target_date: datetime.date | None,
+    ) -> list[dict]:
+        data = self._get(
+            f"{POLYMARKET_GAMMA}/public-search",
+            params={
+                "q": f"temperature {city_name}",
+                "active": "true",
+                "closed": "false",
+                "limit": 50,
+            },
+        )
+        if not data:
+            return []
+
+        candidates: list[dict] = []
+        skipped = {"event_closed": 0, "wrong_date": 0, "not_weather": 0, "no_temp_range": 0}
+        for event in data.get("events", []):
+            if event.get("closed") is True or event.get("active") is False:
+                skipped["event_closed"] += 1
+                continue
+            title = event.get("title", "")
+            if not self._is_weather_market(title):
+                skipped["not_weather"] += 1
+                continue
+            for market in event.get("markets", []):
+                if target_date and self._market_end_date(market) != target_date:
+                    skipped["wrong_date"] += 1
+                    continue
+                if parse_temp_range(market.get("question", "")):
+                    candidates.append(market)
+                else:
+                    skipped["no_temp_range"] += 1
+
+        if MARKET_SCANNER_DEBUG:
+            logger.info(
+                "Market public-search %s: %d candidates (skipped=%s)",
+                city_name,
+                len(candidates),
+                skipped,
+            )
+        return candidates
+
+    def get_open_markets(
+        self,
+        city_name: str,
+        target_date: datetime.date | None = None,
+    ) -> list[dict]:
         """
         Return open Polymarket markets mentioning a city and temperature keywords.
         Order books are fetched in parallel for lower latency.
@@ -143,26 +248,50 @@ class MarketScanner:
         Each result dict: {market_id, no_token_id, question, price_yes, price_no,
                            spread, volume, hours_to_resolution, bucket_low, bucket_high}
         """
+        candidates = self._candidate_markets_from_public_search(city_name, target_date)
+
         data = self._get(
             f"{POLYMARKET_GAMMA}/events",
-            params={"q": city_name, "active": "true", "limit": 50},
+            params={"q": city_name, "active": "true", "closed": "false", "limit": 50},
         )
-        if not data:
+        if not data and not candidates:
+            if MARKET_SCANNER_DEBUG:
+                logger.info("Market scan %s: no Gamma events returned", city_name)
             return []
 
-        events = data if isinstance(data, list) else data.get("data", [])
+        events = data if isinstance(data, list) else data.get("data", []) if data else []
+        if MARKET_SCANNER_DEBUG:
+            logger.info("Market scan %s: %d Gamma events", city_name, len(events))
 
         # Collect candidate markets from all events (no HTTP yet)
-        candidates: list[dict] = []
+        skipped = {"event_closed": 0, "wrong_date": 0, "not_weather": 0, "no_temp_range": 0}
         for event in events:
+            if event.get("closed") is True or event.get("active") is False:
+                skipped["event_closed"] += 1
+                continue
             if not self._is_weather_market(event.get("title", "")):
+                skipped["not_weather"] += 1
                 continue
             for market in event.get("markets", []):
-                if parse_temp_range(market.get("question", "")):
+                if target_date and self._market_end_date(market) != target_date:
+                    skipped["wrong_date"] += 1
+                    continue
+                question = market.get("question", "")
+                if parse_temp_range(question):
                     candidates.append(market)
+                else:
+                    skipped["no_temp_range"] += 1
 
         if not candidates:
+            if MARKET_SCANNER_DEBUG:
+                logger.info(
+                    "Market scan %s: no candidates (skipped=%s)",
+                    city_name, skipped,
+                )
             return []
+        if MARKET_SCANNER_DEBUG:
+            logger.info("Market scan %s: %d candidates (skipped=%s)",
+                        city_name, len(candidates), skipped)
 
         # Fetch all order books in parallel
         markets: list[dict] = []

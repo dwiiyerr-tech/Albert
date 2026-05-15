@@ -11,9 +11,7 @@ import json
 import logging
 from typing import Optional
 
-import anthropic
-
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from llm_client import LLMClient
 from simulation.agents import SimulationResult
 
 logger = logging.getLogger(__name__)
@@ -21,13 +19,12 @@ logger = logging.getLogger(__name__)
 
 class ReportGenerator:
     """
-    Uses Claude with tool use to generate rich prediction reports
-    from multi-agent simulation results, mirroring MiroFish's
-    ReportAgent pattern.
+    Uses the configured LLM to generate rich prediction reports
+    from multi-agent simulation results.
     """
 
     def __init__(self) -> None:
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self._client = LLMClient()
 
     # ─── Tool definitions ─────────────────────────────────────────────────────
 
@@ -128,7 +125,6 @@ class ReportGenerator:
     def generate(self, sim: SimulationResult) -> str:
         """
         Generate a structured natural-language report for a simulation result.
-        Uses Claude with tool use for metrics calculation.
         """
         all_probs = [
             t.probability_estimate
@@ -142,6 +138,15 @@ class ReportGenerator:
             and t.probability_estimate is not None
         ]
 
+        confidence_metrics = self._calculate_confidence_metrics(final_probs or all_probs)
+        trading_signal = self._format_trading_signal(
+            consensus_probability=sim.consensus_probability,
+            confidence_level=sim.confidence_level,
+            bucket_low=sim.bucket_low,
+            bucket_high=sim.bucket_high,
+            model_spread_f=sim.model_spread_f,
+        )
+
         user_prompt = f"""Generate a structured prediction report for the following simulation:
 
 City: {sim.city}
@@ -153,46 +158,25 @@ Model Spread: {f"{sim.model_spread_f:.1f}°F" if sim.model_spread_f else "N/A"}
 Number of Agent Turns: {len(sim.turns)}
 All Agent Probability Estimates: {all_probs}
 Final Round Probabilities: {final_probs}
+Confidence Metrics: {json.dumps(confidence_metrics)}
+Trading Signal: {json.dumps(trading_signal)}
 
-Use the available tools to calculate confidence metrics and format the trading signal,
-then write a 200-300 word report covering:
+Write a 200-300 word report covering:
 1. Forecast summary and model agreement
 2. Agent debate highlights
 3. Consensus probability with statistical context
 4. Trading recommendation
 5. Risk factors and caveats
 """
-        messages = [{"role": "user", "content": user_prompt}]
-
-        # Agentic loop with tool use (MiroFish ReportAgent pattern)
-        for _ in range(5):  # max 5 tool rounds
-            response = self._client.messages.create(
-                model=CLAUDE_MODEL,
+        try:
+            return self._client.text(
+                system="You are a concise weather prediction trading report writer.",
+                messages=[{"role": "user", "content": user_prompt}],
                 max_tokens=1024,
-                tools=self._TOOLS,
-                messages=messages,
             )
-            messages.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason == "end_turn":
-                text_blocks = [b.text for b in response.content if hasattr(b, "text")]
-                return "\n".join(text_blocks)
-
-            if response.stop_reason == "tool_use":
-                tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        result_str = self._dispatch_tool(block.name, block.input)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result_str,
-                        })
-                messages.append({"role": "user", "content": tool_results})
-            else:
-                break
-
-        return f"Report generation incomplete for {sim.city} {sim.target_date}."
+        except Exception as exc:
+            logger.warning("Report generation failed for %s: %s", sim.city, exc)
+            return f"Report generation failed for {sim.city} {sim.target_date}: {exc}"
 
     def generate_summary(self, results: list[SimulationResult]) -> str:
         """Generate a high-level summary across multiple city simulations."""

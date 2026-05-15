@@ -1,8 +1,3 @@
-from .memory import ExperienceMemory, PredictionRecord, MarketObservation
-from .reflection import SelfReflectionEngine
-from .calibration import ProbabilityCalibrator
-from .market_learner import MarketPatternLearner
-
 __all__ = [
     "ExperienceMemory",
     "PredictionRecord",
@@ -11,3 +6,23 @@ __all__ = [
     "ProbabilityCalibrator",
     "MarketPatternLearner",
 ]
+
+
+def __getattr__(name):
+    if name in {"ExperienceMemory", "PredictionRecord", "MarketObservation"}:
+        from .memory import ExperienceMemory, PredictionRecord, MarketObservation
+        return {
+            "ExperienceMemory": ExperienceMemory,
+            "PredictionRecord": PredictionRecord,
+            "MarketObservation": MarketObservation,
+        }[name]
+    if name == "SelfReflectionEngine":
+        from .reflection import SelfReflectionEngine
+        return SelfReflectionEngine
+    if name == "ProbabilityCalibrator":
+        from .calibration import ProbabilityCalibrator
+        return ProbabilityCalibrator
+    if name == "MarketPatternLearner":
+        from .market_learner import MarketPatternLearner
+        return MarketPatternLearner
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

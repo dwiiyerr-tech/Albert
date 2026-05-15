@@ -17,6 +17,8 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
+from config import MAX_DEBATE_TRANSCRIPTS
+
 logger = logging.getLogger(__name__)
 
 MEMORY_FILE = "memory.json"
@@ -57,6 +59,7 @@ class PredictionRecord:
     trade_ev: Optional[float] = None
     trade_pnl_usd: Optional[float] = None
     # Metadata
+    agent_estimates: dict[str, float] = field(default_factory=dict)
     created_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
 
     @property
@@ -147,6 +150,53 @@ class Lesson:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
+@dataclass
+class PersonaScore:
+    name: str
+    predictions: int = 0
+    brier_sum: float = 0.0
+    last_brier: Optional[float] = None
+
+    @property
+    def avg_brier(self) -> Optional[float]:
+        return self.brier_sum / self.predictions if self.predictions else None
+
+    @property
+    def weight(self) -> float:
+        if not self.predictions:
+            return 1.0
+        avg = self.avg_brier or 0.25
+        return max(0.25, min(2.0, 1.0 / (0.25 + avg)))
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PersonaScore":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class DebateTranscript:
+    id: str
+    city: str
+    target_date: str
+    bucket_low: float
+    bucket_high: float
+    consensus_probability: float
+    confidence_level: str
+    turns: list[dict]
+    scenarios: list[dict] = field(default_factory=list)
+    created_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DebateTranscript":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
 # ─── Memory store ─────────────────────────────────────────────────────────────
 
 class ExperienceMemory:
@@ -161,6 +211,9 @@ class ExperienceMemory:
         self.predictions: dict[str, PredictionRecord] = {}
         self.observations: list[MarketObservation] = []
         self.lessons: list[Lesson] = []
+        self.persona_scores: dict[str, PersonaScore] = {}
+        self.debate_transcripts: list[DebateTranscript] = []
+        self.dynamic_personas: list[dict[str, str]] = []
         self._load()
 
     # ─── Persistence ──────────────────────────────────────────────────────────
@@ -178,9 +231,18 @@ class ExperienceMemory:
                 self.observations.append(MarketObservation.from_dict(d))
             for d in raw.get("lessons", []):
                 self.lessons.append(Lesson.from_dict(d))
+            for d in raw.get("persona_scores", []):
+                score = PersonaScore.from_dict(d)
+                self.persona_scores[score.name] = score
+            for d in raw.get("debate_transcripts", []):
+                self.debate_transcripts.append(DebateTranscript.from_dict(d))
+            self.dynamic_personas = [
+                p for p in raw.get("dynamic_personas", []) if isinstance(p, dict)
+            ]
             logger.info(
-                "Memory loaded: %d predictions, %d observations, %d lessons",
+                "Memory loaded: %d predictions, %d observations, %d lessons, %d persona scores",
                 len(self.predictions), len(self.observations), len(self.lessons),
+                len(self.persona_scores),
             )
         except Exception as exc:
             logger.warning("Memory load failed: %s", exc)
@@ -193,6 +255,9 @@ class ExperienceMemory:
                 "predictions": [r.to_dict() for r in all_preds[:1000]],
                 "observations": [o.to_dict() for o in self.observations[-2000:]],
                 "lessons": [l.to_dict() for l in self.lessons],
+                "persona_scores": [s.to_dict() for s in self.persona_scores.values()],
+                "debate_transcripts": [t.to_dict() for t in self.debate_transcripts[-MAX_DEBATE_TRANSCRIPTS:]],
+                "dynamic_personas": self.dynamic_personas[-8:],
             }
         tmp_file = self._file + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
@@ -208,6 +273,12 @@ class ExperienceMemory:
         with self._lock:
             self.predictions[rec.id] = rec
         return rec
+
+    def record_debate_transcript(self, **kwargs) -> DebateTranscript:
+        transcript = DebateTranscript(id=str(uuid.uuid4()), **kwargs)
+        with self._lock:
+            self.debate_transcripts.append(transcript)
+        return transcript
 
     def record_observation(self, **kwargs) -> MarketObservation:
         obs = MarketObservation(id=str(uuid.uuid4()), **kwargs)
@@ -283,6 +354,17 @@ class ExperienceMemory:
         rec.resolution_ts = datetime.datetime.utcnow().isoformat()
         if pnl_usd is not None:
             rec.trade_pnl_usd = pnl_usd
+        actual = 1.0 if outcome_yes else 0.0
+        for persona, prob in (rec.agent_estimates or {}).items():
+            try:
+                p = float(prob)
+            except (TypeError, ValueError):
+                continue
+            score = self.persona_scores.setdefault(persona, PersonaScore(name=persona))
+            brier = (p - actual) ** 2
+            score.predictions += 1
+            score.brier_sum += brier
+            score.last_brier = brier
         return rec
 
     # ─── Read / retrieval ─────────────────────────────────────────────────────
@@ -308,6 +390,29 @@ class ExperienceMemory:
 
     def lessons_by_category(self, category: str) -> list[Lesson]:
         return [l for l in self.lessons if l.category == category]
+
+    def persona_weight(self, persona_name: str) -> float:
+        score = self.persona_scores.get(persona_name)
+        return score.weight if score else 1.0
+
+    def persona_score_report(self) -> list[dict]:
+        rows = []
+        for s in sorted(self.persona_scores.values(), key=lambda x: x.avg_brier or 999):
+            rows.append({
+                "name": s.name,
+                "predictions": s.predictions,
+                "avg_brier": round(s.avg_brier, 4) if s.avg_brier is not None else None,
+                "weight": round(s.weight, 3),
+            })
+        return rows
+
+    def add_dynamic_persona(self, persona: dict[str, str]) -> None:
+        required = {"name", "bias", "style"}
+        if not required.issubset(persona):
+            return
+        with self._lock:
+            if not any(p.get("name") == persona["name"] for p in self.dynamic_personas):
+                self.dynamic_personas.append({k: str(persona[k]) for k in required})
 
     def recent_market_stats(self, city: str, last_n: int = 50) -> dict:
         """Aggregate stats from recent resolved observations for a city."""

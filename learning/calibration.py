@@ -236,10 +236,12 @@ class ProbabilityCalibrator:
                 continue
             brier = self.brier_score(city)
             ece = self.expected_calibration_error(city)
+            brier_s = f"{brier:.4f}" if brier is not None else "N/A"
+            ece_s = f"{ece:.4f}" if ece is not None else "N/A"
             lines.append(
                 f"  {city:<18} n={n:>3}  "
-                f"Brier={brier:.4f if brier else '  N/A'}  "
-                f"ECE={ece:.4f if ece else '  N/A'}"
+                f"Brier={brier_s}  "
+                f"ECE={ece_s}"
             )
         return "\n".join(lines)
 

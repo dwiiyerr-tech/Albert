@@ -51,9 +51,17 @@ Instead of feeding raw forecast temperatures directly to a trading algorithm, Mi
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Set environment variables
-export ANTHROPIC_API_KEY="sk-ant-..."
+# 2. Set environment variables (Anthropic native)
+export LLM_PROVIDER="anthropic"
+export LLM_API_KEY="sk-ant-..."
+export LLM_MODEL="claude-sonnet-4-6"
 export VISUAL_CROSSING_API_KEY="..."   # optional, for historical validation
+
+# Or use any OpenAI-compatible API:
+# export LLM_PROVIDER="openai-compatible"
+# export LLM_API_KEY="..."
+# export LLM_MODEL="gpt-4.1"
+# export LLM_BASE_URL="https://api.openai.com/v1"
 
 # 3. Run one analysis cycle (dry run — no real trades)
 python main.py --run
@@ -99,6 +107,20 @@ All parameters are in `config.py`:
 | **Jordan (Mesoscale Expert)** | Prioritises METAR + urban heat islands | Detailed, micro-climate focus |
 | **Sam (Climatologist)** | Weights historical anomalies | Cautious, references 30-year normals |
 | **Casey (Contrarian)** | Questions model consensus | Provocative, hunts tail risks |
+
+### MiroFish-Style Learning Extensions
+
+- Full debate transcripts are persisted to memory for later audit and self-play.
+- Persona estimates are stored by name so resolved markets can score each analyst.
+- Future votes are weighted by historical persona Brier score when enough outcomes exist.
+- Dynamic personas can be created by self-play reflection when a missing viewpoint is detected.
+- Multi-provider LLM ensemble is supported with `LLM_ENSEMBLE`, rotating personas across configured providers/models.
+
+Example ensemble:
+
+```bash
+export LLM_ENSEMBLE="anthropic:claude-sonnet-4-6,openai-compatible:gpt-4.1:https://api.openai.com/v1"
+```
 
 ---
 
