@@ -35,6 +35,8 @@ from config import (
     HIGH_SPREAD_THRESHOLD_F,
     MAX_PARALLEL_CITIES,
     DEFAULT_MODE,
+    MAX_POSITIONS_PER_CITY_DATE,
+    MAX_EXPOSURE_PER_CITY_DATE_USD,
     SAVE_DEBATE_TRANSCRIPTS,
     SELF_PLAY_REFLECTION,
     DEMO_SYNTHETIC_MARKETS,
@@ -344,6 +346,8 @@ class MiroWeatherAgent:
                     "price_yes": 0.45,
                     "price_no": 0.55,
                     "spread": 0.01,
+                    "slippage": 0.0,
+                    "orderbook_depth_usd": 10_000.0,
                     "volume": 10_000.0,
                     "hours_to_resolution": 24.0,
                     "bucket_low": bucket_low,
@@ -396,6 +400,8 @@ class MiroWeatherAgent:
                 spread=market["spread"],
                 no_token_id=market.get("no_token_id", ""),
                 market_price_no=market.get("price_no"),
+                orderbook_depth_usd=market.get("orderbook_depth_usd", 0.0),
+                slippage=market.get("slippage", 0.0),
             )
             if signal and signal.is_actionable:
                 city_signals.append(signal)
@@ -490,7 +496,7 @@ class MiroWeatherAgent:
                                 "probability_estimate": t.probability_estimate,
                                 "conditional_probs": t.conditional_probs,
                                 "provider": t.provider,
-                                "model": t.model,
+                        "model": t.model,
                             }
                             for t in sim.turns
                         ],
@@ -504,6 +510,50 @@ class MiroWeatherAgent:
                             for s in sim.scenarios
                         ],
                     )
+
+    def _signal_group_key(self, signal: TradeSignal) -> tuple[str, str]:
+        return (signal.city, signal.target_date)
+
+    def _signal_score(self, signal: TradeSignal) -> float:
+        confidence_weight = {"high": 1.20, "medium": 1.0, "low": 0.0}.get(
+            signal.confidence_level,
+            0.8,
+        )
+        liquidity_weight = min(
+            1.5,
+            max(0.5, signal.orderbook_depth_usd / max(signal.recommended_usd, 0.01)),
+        )
+        time_penalty = math.log(max(1.0, signal.hours_to_resolution) + 2)
+        return signal.ev * confidence_weight * liquidity_weight / time_penalty
+
+    def _select_portfolio_candidates(self, signals: list[TradeSignal]) -> list[TradeSignal]:
+        grouped: dict[tuple[str, str], list[TradeSignal]] = {}
+        for signal in signals:
+            grouped.setdefault(self._signal_group_key(signal), []).append(signal)
+
+        selected: list[TradeSignal] = []
+        for group_signals in grouped.values():
+            group_signals.sort(key=self._signal_score, reverse=True)
+            selected.extend(group_signals[:MAX_POSITIONS_PER_CITY_DATE])
+
+        selected.sort(key=self._signal_score, reverse=True)
+        return selected
+
+    def _city_date_position_state(self, city: str, target_date: str) -> tuple[int, float]:
+        positions = [
+            p for p in self.positions.open_positions.values()
+            if p.city == city and p.target_date == target_date
+        ]
+        exposure = sum(p.size_usd for p in positions)
+        return len(positions), exposure
+
+    def _city_date_limit_reason(self, signal: TradeSignal) -> str:
+        count, exposure = self._city_date_position_state(signal.city, signal.target_date)
+        if count >= MAX_POSITIONS_PER_CITY_DATE:
+            return "city/date position limit"
+        if exposure + signal.recommended_usd > MAX_EXPOSURE_PER_CITY_DATE_USD:
+            return "city/date exposure limit"
+        return ""
 
     def run_cycle(self, days_ahead: int = 1) -> list[TradeSignal]:
         """
@@ -574,15 +624,14 @@ class MiroWeatherAgent:
         # Prioritise signals: high EV + low time-to-resolution first.
         # Score = EV / log(hours+2) so 1-hour markets outrank 72-hour ones
         # even at the same EV, favouring faster fills and tighter spreads.
-        actionable.sort(
-            key=lambda s: s.ev / math.log(max(1.0, s.hours_to_resolution) + 2),
-            reverse=True,
-        )
+        actionable = self._select_portfolio_candidates(actionable)
+        self._cycle_state["last_signals"] = list(actionable)
         if actionable:
             logger.info(
                 "Signals (priority-sorted): %s",
                 " | ".join(
-                    f"{s.direction} {s.city} EV={s.ev:.3f} {s.hours_to_resolution:.1f}h"
+                    f"{s.direction} {s.city} EV={s.ev:.3f} edge={s.probability_edge:.3f} "
+                    f"{s.hours_to_resolution:.1f}h"
                     for s in actionable[:5]
                 ),
             )
@@ -593,6 +642,11 @@ class MiroWeatherAgent:
                 # Demo mode: open position virtually, gated by virtual wallet
                 if signal.market_id in self.positions.open_positions:
                     self._demo.record_trade(signal, executed=False, skip_reason="already open")
+                    continue
+                limit_reason = self._city_date_limit_reason(signal)
+                if limit_reason:
+                    self._demo.record_trade(signal, executed=False, skip_reason=limit_reason)
+                    logger.info("DEMO: %s for %s %s", limit_reason, signal.city, signal.target_date)
                     continue
                 if not self._demo.wallet.can_open(signal.recommended_usd, self.positions):
                     self._demo.record_trade(signal, executed=False, skip_reason="insufficient virtual balance")
@@ -617,6 +671,10 @@ class MiroWeatherAgent:
             elif not self.dry_run:
                 if signal.market_id in self.positions.open_positions:
                     logger.debug("Already open: %s — skipping", signal.market_id)
+                    continue
+                limit_reason = self._city_date_limit_reason(signal)
+                if limit_reason:
+                    logger.info("LIVE: %s for %s %s", limit_reason, signal.city, signal.target_date)
                     continue
 
                 if not self.executor or not self.executor.is_configured():

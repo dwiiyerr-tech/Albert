@@ -23,6 +23,8 @@ from config import (
     POLYMARKET_BASE,
     POLYMARKET_GAMMA,
     MAX_PARALLEL_ORDERBOOKS,
+    MAX_ORDERBOOK_SLIPPAGE,
+    MIN_ORDERBOOK_DEPTH_USD,
 )
 from weather_data import parse_temp_range
 
@@ -75,6 +77,52 @@ class MarketScanner:
             logger.warning("Polymarket request failed: %s | %s", url, exc)
             return None
 
+    def _effective_ask(self, asks: list[dict]) -> Optional[dict]:
+        levels: list[tuple[float, float]] = []
+        for ask in asks:
+            try:
+                price = float(ask.get("price", 0.0))
+                size = float(ask.get("size", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if 0 < price < 1 and size > 0:
+                levels.append((price, size))
+
+        if not levels:
+            return None
+
+        levels.sort(key=lambda item: item[0])
+        best_ask = levels[0][0]
+        max_fill_price = min(0.99, best_ask + MAX_ORDERBOOK_SLIPPAGE)
+        fill_levels = [(price, size) for price, size in levels if price <= max_fill_price]
+        depth_usd = sum(price * size for price, size in fill_levels)
+        if depth_usd < MIN_ORDERBOOK_DEPTH_USD:
+            return None
+
+        remaining = MIN_ORDERBOOK_DEPTH_USD
+        total_cost = 0.0
+        total_shares = 0.0
+        for price, size in fill_levels:
+            level_cost = price * size
+            take_cost = min(remaining, level_cost)
+            if take_cost <= 0:
+                continue
+            total_cost += take_cost
+            total_shares += take_cost / price
+            remaining -= take_cost
+            if remaining <= 1e-9:
+                break
+
+        if total_shares <= 0:
+            return None
+        effective_ask = total_cost / total_shares
+        return {
+            "best_ask": max(0.01, min(0.99, best_ask)),
+            "effective_ask": max(0.01, min(0.99, effective_ask)),
+            "ask_depth_usd": depth_usd,
+            "slippage": max(0.0, effective_ask - best_ask),
+        }
+
     def _book_prices(self, token_id: str) -> Optional[dict]:
         ob = self._get(f"{POLYMARKET_BASE}/book", params={"token_id": token_id})
         if not ob:
@@ -82,16 +130,21 @@ class MarketScanner:
         try:
             asks = ob.get("asks") or []
             bids = ob.get("bids") or []
-            best_ask = min(float(a.get("price", 1.0)) for a in asks) if asks else 1.0
+            ask = self._effective_ask(asks)
+            if not ask:
+                return None
             best_bid = max(float(b.get("price", 0.0)) for b in bids) if bids else 0.0
-            spread = best_ask - best_bid
+            spread = ask["best_ask"] - best_bid
             if spread < 0:
                 return None
             return {
-                "best_ask": max(0.01, min(0.99, best_ask)),
+                "best_ask": ask["best_ask"],
+                "effective_ask": ask["effective_ask"],
                 "best_bid": max(0.01, min(0.99, best_bid)),
-                "mid": max(0.01, min(0.99, (best_ask + best_bid) / 2)),
+                "mid": max(0.01, min(0.99, (ask["best_ask"] + best_bid) / 2)),
                 "spread": spread,
+                "ask_depth_usd": ask["ask_depth_usd"],
+                "slippage": ask["slippage"],
             }
         except (ValueError, TypeError) as exc:
             logger.debug("Order book parse failed: %s", exc)
@@ -160,12 +213,14 @@ class MarketScanner:
         no_book = self._book_prices(no_token_id) if no_token_id else None
 
         try:
-            price_yes = yes_book["best_ask"]
-            price_no = no_book["best_ask"] if no_book else max(
-                0.01,
-                min(0.99, 1 - yes_book["best_bid"]),
-            )
+            price_yes = yes_book["effective_ask"]
+            price_no = no_book["effective_ask"] if no_book else max(0.01, min(0.99, 1 - yes_book["best_bid"]))
             spread = max(yes_book["spread"], no_book["spread"] if no_book else yes_book["spread"])
+            slippage = max(yes_book["slippage"], no_book["slippage"] if no_book else yes_book["slippage"])
+            depth_usd = min(
+                yes_book["ask_depth_usd"],
+                no_book["ask_depth_usd"] if no_book else yes_book["ask_depth_usd"],
+            )
             volume = float(market.get("volume", 0))
             hours = self._hours_until_resolution(market.get("endDate", ""))
         except (ValueError, TypeError, IndexError, KeyError) as exc:
@@ -185,6 +240,8 @@ class MarketScanner:
             "mid_yes": yes_book["mid"],
             "best_bid_yes": yes_book["best_bid"],
             "spread": spread,
+            "slippage": slippage,
+            "orderbook_depth_usd": depth_usd,
             "volume": volume,
             "hours_to_resolution": hours,
             "bucket_low": b_low,

@@ -90,6 +90,13 @@ All parameters are in `config.py`:
 | `MIN_EV` | 0.10 | Minimum expected value to enter a trade |
 | `MAX_SPREAD` | 0.03 | Maximum bid-ask spread |
 | `MIN_VOLUME` | 500 | Minimum contract volume |
+| `MIN_ENTRY_PRICE` | 0.03 | Reject micro-price entries below 3 cents |
+| `MAX_ENTRY_PRICE` | 0.95 | Reject entries priced too close to resolution |
+| `MIN_PROB_EDGE` | 0.05 | Minimum probability edge over entry price |
+| `MIN_ORDERBOOK_DEPTH_USD` | $1 | Minimum executable orderbook depth near best ask |
+| `MAX_ORDERBOOK_SLIPPAGE` | 0.02 | Maximum allowed slippage for effective entry price |
+| `MAX_POSITIONS_PER_CITY_DATE` | 1 | Max open positions per city/date event |
+| `MAX_EXPOSURE_PER_CITY_DATE_USD` | $2 | Max open exposure per city/date event |
 | `KELLY_FRACTION` | 0.25 | Fractional Kelly multiplier |
 | `MAX_TRADE_SIZE_USD` | $20 | Maximum position size |
 | `SIM_ROUNDS` | 3 | Debate rounds per city per bucket |

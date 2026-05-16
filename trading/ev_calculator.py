@@ -21,6 +21,11 @@ from config import (
     MIN_EV,
     MAX_SPREAD,
     MIN_VOLUME,
+    MIN_ENTRY_PRICE,
+    MAX_ENTRY_PRICE,
+    MIN_PROB_EDGE,
+    MIN_ORDERBOOK_DEPTH_USD,
+    MAX_ORDERBOOK_SLIPPAGE,
     MIN_HOURS_TO_RESOLUTION,
     MAX_HOURS_TO_RESOLUTION,
     CONSENSUS_THRESHOLD,
@@ -51,11 +56,19 @@ class TradeSignal:
     volume: float
     market_id: str = ""
     no_token_id: str = ""   # CLOB NO token ID (needed for live NO-direction orders)
+    probability_edge: float = 0.0
+    orderbook_depth_usd: float = 0.0
+    slippage: float = 0.0
 
     @property
     def is_actionable(self) -> bool:
         return (
             self.ev >= MIN_EV
+            and self.market_price >= MIN_ENTRY_PRICE
+            and self.market_price <= MAX_ENTRY_PRICE
+            and self.probability_edge >= MIN_PROB_EDGE
+            and self.orderbook_depth_usd >= MIN_ORDERBOOK_DEPTH_USD
+            and self.slippage <= MAX_ORDERBOOK_SLIPPAGE
             and self.confidence_level != "low"
             and self.hours_to_resolution >= MIN_HOURS_TO_RESOLUTION
             and self.hours_to_resolution <= MAX_HOURS_TO_RESOLUTION
@@ -159,6 +172,8 @@ class EVCalculator:
         spread: float,
         no_token_id: str = "",
         market_price_no: float | None = None,
+        orderbook_depth_usd: float = 0.0,
+        slippage: float = 0.0,
     ) -> Optional[TradeSignal]:
         """
         Generate a TradeSignal from a SimulationResult and live market data.
@@ -169,6 +184,10 @@ class EVCalculator:
         if spread > MAX_SPREAD:
             return None
         if volume < MIN_VOLUME:
+            return None
+        if orderbook_depth_usd < MIN_ORDERBOOK_DEPTH_USD:
+            return None
+        if slippage > MAX_ORDERBOOK_SLIPPAGE:
             return None
         if not (MIN_HOURS_TO_RESOLUTION <= hours_to_resolution <= MAX_HOURS_TO_RESOLUTION):
             return None
@@ -196,13 +215,20 @@ class EVCalculator:
             ev = ev_yes
             probability = p_yes
             price = market_price
+            edge = probability - price
         elif ev_no > ev_yes and ev_no >= 0:
             direction = "NO"
             ev = ev_no
             probability = 1 - p_yes
             price = no_price
+            edge = probability - price
         else:
             return None  # no positive EV on either side
+
+        if price < MIN_ENTRY_PRICE or price > MAX_ENTRY_PRICE:
+            return None
+        if edge < MIN_PROB_EDGE:
+            return None
 
         kelly = self.compute_kelly(probability, price)
         # Conservative position size: Kelly × $100 bankroll baseline, cap at MAX_TRADE_SIZE_USD
@@ -224,4 +250,7 @@ class EVCalculator:
             volume=volume,
             market_id=market_id,
             no_token_id=no_token_id,
+            probability_edge=edge,
+            orderbook_depth_usd=orderbook_depth_usd,
+            slippage=slippage,
         )
