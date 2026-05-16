@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 BINANCE_SPOT_BASE = "https://api.binance.com"
 BINANCE_FUTURES_BASE = "https://fapi.binance.com"
+POLYMARKET_DATA_API = "https://data-api.polymarket.com"
 
 
 def _coerce_list(value) -> list:
@@ -47,6 +48,26 @@ def _get_any(data: dict, *keys: str):
         if key in data and data[key] is not None:
             return data[key]
     return None
+
+
+def _unix_to_iso(value) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if seconds > 10_000_000_000:
+        seconds = seconds / 1000
+    return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc).isoformat()
+
+
+def _join_csv(values: Iterable[str] | None) -> str:
+    if not values:
+        return ""
+    if isinstance(values, str):
+        return values
+    return ",".join(str(value) for value in values if value)
 
 
 def flatten_polymarket_events(payload: dict | list, collected_at: str | None = None) -> list[dict]:
@@ -151,6 +172,147 @@ def rows_from_binance_klines(
     return parsed
 
 
+def rows_from_polymarket_price_history(
+    payload: dict | list,
+    token_id: str,
+    interval: str,
+    collected_at: str | None = None,
+) -> list[dict]:
+    ts = collected_at or now_utc_iso()
+    if isinstance(payload, dict):
+        points = payload.get("history") or payload.get("prices") or payload.get("data") or []
+    elif isinstance(payload, list):
+        points = payload
+    else:
+        points = []
+
+    rows: list[dict] = []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        timestamp = _get_any(point, "t", "timestamp", "time")
+        rows.append({
+            "collected_at": ts,
+            "token_id": token_id,
+            "interval": interval,
+            "timestamp": timestamp,
+            "timestamp_iso": _unix_to_iso(timestamp),
+            "price": _coerce_float(_get_any(point, "p", "price")),
+            "raw": point,
+        })
+    return rows
+
+
+def rows_from_polymarket_trades(payload: dict | list, collected_at: str | None = None) -> list[dict]:
+    ts = collected_at or now_utc_iso()
+    trades = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(trades, list):
+        return []
+
+    rows: list[dict] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        timestamp = _get_any(trade, "timestamp", "createdAt", "created_at")
+        rows.append({
+            "collected_at": ts,
+            "proxy_wallet": str(_get_any(trade, "proxyWallet", "proxy_wallet") or ""),
+            "side": str(trade.get("side") or ""),
+            "asset": str(trade.get("asset") or ""),
+            "condition_id": str(_get_any(trade, "conditionId", "condition_id") or ""),
+            "size": _coerce_float(trade.get("size")),
+            "price": _coerce_float(trade.get("price")),
+            "timestamp": timestamp,
+            "timestamp_iso": _unix_to_iso(timestamp),
+            "title": str(trade.get("title") or ""),
+            "slug": str(trade.get("slug") or ""),
+            "event_slug": str(_get_any(trade, "eventSlug", "event_slug") or ""),
+            "outcome": str(trade.get("outcome") or ""),
+            "outcome_index": _get_any(trade, "outcomeIndex", "outcome_index"),
+            "name": str(trade.get("name") or ""),
+            "pseudonym": str(trade.get("pseudonym") or ""),
+            "transaction_hash": str(_get_any(trade, "transactionHash", "transaction_hash") or ""),
+            "raw": trade,
+        })
+    return rows
+
+
+def rows_from_polymarket_holders(payload: dict | list, collected_at: str | None = None) -> list[dict]:
+    ts = collected_at or now_utc_iso()
+    markets = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(markets, list):
+        return []
+
+    rows: list[dict] = []
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        token_id = str(_get_any(market, "token", "asset", "token_id") or "")
+        for holder in market.get("holders") or []:
+            if not isinstance(holder, dict):
+                continue
+            rows.append({
+                "collected_at": ts,
+                "token_id": token_id,
+                "proxy_wallet": str(_get_any(holder, "proxyWallet", "proxy_wallet") or ""),
+                "asset": str(holder.get("asset") or ""),
+                "amount": _coerce_float(holder.get("amount")),
+                "outcome_index": _get_any(holder, "outcomeIndex", "outcome_index"),
+                "name": str(holder.get("name") or ""),
+                "pseudonym": str(holder.get("pseudonym") or ""),
+                "raw": holder,
+            })
+    return rows
+
+
+def rows_from_polymarket_open_interest(payload: dict | list, collected_at: str | None = None) -> list[dict]:
+    ts = collected_at or now_utc_iso()
+    markets = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(markets, list):
+        return []
+
+    rows: list[dict] = []
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        rows.append({
+            "collected_at": ts,
+            "condition_id": str(_get_any(market, "market", "conditionId", "condition_id") or ""),
+            "open_interest": _coerce_float(_get_any(market, "value", "openInterest", "open_interest")),
+            "raw": market,
+        })
+    return rows
+
+
+def rows_from_polymarket_activity(payload: dict | list, collected_at: str | None = None) -> list[dict]:
+    ts = collected_at or now_utc_iso()
+    activity = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(activity, list):
+        return []
+
+    rows: list[dict] = []
+    for item in activity:
+        if not isinstance(item, dict):
+            continue
+        timestamp = _get_any(item, "timestamp", "createdAt", "created_at")
+        rows.append({
+            "collected_at": ts,
+            "proxy_wallet": str(_get_any(item, "proxyWallet", "proxy_wallet") or ""),
+            "condition_id": str(_get_any(item, "conditionId", "condition_id") or ""),
+            "asset": str(item.get("asset") or ""),
+            "type": str(item.get("type") or ""),
+            "side": str(item.get("side") or ""),
+            "size": _coerce_float(item.get("size")),
+            "usdc_size": _coerce_float(_get_any(item, "usdcSize", "usdc_size")),
+            "price": _coerce_float(item.get("price")),
+            "timestamp": timestamp,
+            "timestamp_iso": _unix_to_iso(timestamp),
+            "transaction_hash": str(_get_any(item, "transactionHash", "transaction_hash") or ""),
+            "raw": item,
+        })
+    return rows
+
+
 def _nth(values, idx: int):
     if not isinstance(values, list) or idx >= len(values):
         return None
@@ -220,6 +382,84 @@ class DataCollector:
                 })
             time.sleep(self._sleep_seconds)
         return rows
+
+    def collect_polymarket_price_history(
+        self,
+        token_ids: Iterable[str],
+        start_date: dt.date,
+        end_date: dt.date,
+        interval: str = "1d",
+        fidelity: int | None = None,
+    ) -> list[dict]:
+        rows: list[dict] = []
+        start_ts = utc_ms(start_date) // 1000
+        end_ts = utc_ms(end_date, end_of_day=True) // 1000
+        for token_id in token_ids:
+            if not token_id:
+                continue
+            params = {
+                "market": token_id,
+                "startTs": start_ts,
+                "endTs": end_ts,
+                "interval": interval,
+            }
+            if fidelity is not None:
+                params["fidelity"] = fidelity
+            payload = self.get_json(f"{POLYMARKET_BASE}/prices-history", params)
+            rows.extend(rows_from_polymarket_price_history(payload or {}, token_id, interval))
+            time.sleep(self._sleep_seconds)
+        return rows
+
+    def collect_polymarket_trades(
+        self,
+        condition_ids: Iterable[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        taker_only: bool = True,
+    ) -> list[dict]:
+        params: dict = {"limit": limit, "offset": offset, "takerOnly": str(taker_only).lower()}
+        market = _join_csv(condition_ids)
+        if market:
+            params["market"] = market
+        payload = self.get_json(f"{POLYMARKET_DATA_API}/trades", params)
+        return rows_from_polymarket_trades(payload or {})
+
+    def collect_polymarket_holders(
+        self,
+        condition_ids: Iterable[str],
+        limit: int = 20,
+        min_balance: int = 1,
+    ) -> list[dict]:
+        market = _join_csv(condition_ids)
+        if not market:
+            return []
+        payload = self.get_json(
+            f"{POLYMARKET_DATA_API}/holders",
+            {"market": market, "limit": min(limit, 20), "minBalance": min_balance},
+        )
+        return rows_from_polymarket_holders(payload or {})
+
+    def collect_polymarket_open_interest(self, condition_ids: Iterable[str] | None = None) -> list[dict]:
+        params = {}
+        market = _join_csv(condition_ids)
+        if market:
+            params["market"] = market
+        payload = self.get_json(f"{POLYMARKET_DATA_API}/oi", params)
+        return rows_from_polymarket_open_interest(payload or {})
+
+    def collect_polymarket_user_activity(
+        self,
+        user: str,
+        condition_ids: Iterable[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        params: dict = {"user": user, "limit": limit, "offset": offset}
+        market = _join_csv(condition_ids)
+        if market:
+            params["market"] = market
+        payload = self.get_json(f"{POLYMARKET_DATA_API}/activity", params)
+        return rows_from_polymarket_activity(payload or {})
 
     def collect_weather_forecast(self, cities: Iterable[dict], days: int = 7) -> list[dict]:
         rows: list[dict] = []

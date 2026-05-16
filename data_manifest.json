@@ -67,6 +67,204 @@
       "purpose": "Official settlement labels for supervised learning and trade PnL validation."
     },
     {
+      "name": "polymarket_clob_price_history",
+      "category": "prediction_market_microstructure",
+      "auth": "none",
+      "endpoint": "https://clob.polymarket.com/prices-history",
+      "cadence": "historical_backfill_or_hourly",
+      "output": "data/raw/polymarket/price_history.jsonl",
+      "fields": [
+        "token_id",
+        "start_ts",
+        "end_ts",
+        "interval",
+        "fidelity",
+        "timestamp",
+        "timestamp_iso",
+        "price"
+      ],
+      "purpose": "Price path features: momentum, volatility, drawdown, time-to-close drift, and calibration against later outcomes."
+    },
+    {
+      "name": "polymarket_clob_trade_events",
+      "category": "prediction_market_microstructure",
+      "auth": "none",
+      "endpoint": "CLOB SDK public method getMarketTradesEvents(conditionID)",
+      "cadence": "cycle_or_1m",
+      "output": "data/raw/polymarket/clob_trade_events.jsonl",
+      "fields": [
+        "condition_id",
+        "asset_id",
+        "side",
+        "size",
+        "price",
+        "outcome",
+        "outcome_index",
+        "fee_rate_bps",
+        "transaction_hash",
+        "timestamp",
+        "user_address",
+        "username"
+      ],
+      "purpose": "Recent tape features: aggressive buying/selling, whale prints, trade imbalance, and post-trade price impact."
+    },
+    {
+      "name": "polymarket_data_trades",
+      "category": "prediction_market_flow",
+      "auth": "none",
+      "endpoint": "https://data-api.polymarket.com/trades",
+      "cadence": "cycle_or_1m",
+      "output": "data/raw/polymarket/data_api_trades.jsonl",
+      "fields": [
+        "proxy_wallet",
+        "side",
+        "asset",
+        "condition_id",
+        "size",
+        "price",
+        "timestamp",
+        "timestamp_iso",
+        "title",
+        "slug",
+        "event_slug",
+        "outcome",
+        "outcome_index",
+        "pseudonym",
+        "transaction_hash"
+      ],
+      "purpose": "Public wallet-level trade flow for following informed wallets, estimating crowding, and detecting late information shocks."
+    },
+    {
+      "name": "polymarket_data_holders",
+      "category": "prediction_market_flow",
+      "auth": "none",
+      "endpoint": "https://data-api.polymarket.com/holders",
+      "cadence": "cycle_or_5m",
+      "output": "data/raw/polymarket/holders.jsonl",
+      "fields": [
+        "token_id",
+        "proxy_wallet",
+        "asset",
+        "amount",
+        "outcome_index",
+        "name",
+        "pseudonym"
+      ],
+      "purpose": "Holder concentration, top-wallet ownership, whale exposure changes, and market manipulation/crowding risk."
+    },
+    {
+      "name": "polymarket_data_open_interest",
+      "category": "prediction_market_flow",
+      "auth": "none",
+      "endpoint": "https://data-api.polymarket.com/oi",
+      "cadence": "cycle_or_5m",
+      "output": "data/raw/polymarket/open_interest.jsonl",
+      "fields": [
+        "collected_at",
+        "condition_id",
+        "open_interest"
+      ],
+      "purpose": "Open-interest growth/decay, liquidity regime, market attention, and late-cycle risk sizing features."
+    },
+    {
+      "name": "polymarket_data_user_activity",
+      "category": "prediction_market_flow",
+      "auth": "none",
+      "endpoint": "https://data-api.polymarket.com/activity",
+      "cadence": "targeted_wallet_backfill",
+      "output": "data/raw/polymarket/user_activity.jsonl",
+      "fields": [
+        "proxy_wallet",
+        "condition_id",
+        "asset",
+        "type",
+        "side",
+        "size",
+        "usdc_size",
+        "price",
+        "timestamp",
+        "timestamp_iso",
+        "transaction_hash"
+      ],
+      "purpose": "Wallet profiling for market makers, sharp traders, realized behavior, and suspicious flow filters."
+    },
+    {
+      "name": "polymarket_gamma_comments",
+      "category": "prediction_market_sentiment",
+      "auth": "none",
+      "endpoint": "https://gamma-api.polymarket.com/comments",
+      "cadence": "cycle_or_5m",
+      "output": "data/raw/polymarket/comments.jsonl",
+      "fields": [
+        "comment_id",
+        "market_id",
+        "event_id",
+        "user_address",
+        "body",
+        "created_at",
+        "updated_at"
+      ],
+      "purpose": "Market-specific crowd narrative, rumor detection, catalyst discovery, and LLM debate context."
+    },
+    {
+      "name": "polymarket_gamma_tags_series",
+      "category": "prediction_market_metadata",
+      "auth": "none",
+      "endpoint": "https://gamma-api.polymarket.com/tags + https://gamma-api.polymarket.com/series",
+      "cadence": "daily",
+      "output": "data/raw/polymarket/tags_series.jsonl",
+      "fields": [
+        "id",
+        "slug",
+        "label",
+        "category",
+        "related_tags",
+        "series_id",
+        "series_slug"
+      ],
+      "purpose": "Cross-market grouping for sector priors, correlated-market exposure, and category-specific calibration."
+    },
+    {
+      "name": "polymarket_clob_websocket_market",
+      "category": "prediction_market_realtime",
+      "auth": "none_or_l2_for_user_channel",
+      "endpoint": "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+      "cadence": "streaming",
+      "output": "data/raw/polymarket/ws_market_events.jsonl",
+      "fields": [
+        "asset_id",
+        "condition_id",
+        "event_type",
+        "price",
+        "size",
+        "side",
+        "timestamp",
+        "timestamp_iso",
+        "book_hash"
+      ],
+      "purpose": "Low-latency quote/tape state for execution, stale-book avoidance, spread regime tracking, and alerting."
+    },
+    {
+      "name": "polymarket_onchain_providers",
+      "category": "prediction_market_onchain",
+      "auth": "provider_dependent",
+      "endpoint": "Goldsky/Dune/Allium/CryptoHouse Polymarket datasets",
+      "cadence": "streaming_or_historical_backfill",
+      "output": "data/raw/polymarket/onchain_activity.jsonl",
+      "fields": [
+        "block_time",
+        "transaction_hash",
+        "wallet",
+        "contract",
+        "condition_id",
+        "token_id",
+        "event_type",
+        "amount",
+        "usdc_value"
+      ],
+      "purpose": "Independent on-chain audit layer for trades, balances, splits, merges, redeems, wallet flows, and settlement reconciliation."
+    },
+    {
       "name": "openmeteo_forecast",
       "category": "weather",
       "auth": "none",

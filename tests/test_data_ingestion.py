@@ -8,6 +8,10 @@ from data_ingestion.collectors import (
     flatten_polymarket_events,
     rows_from_binance_klines,
     rows_from_openmeteo_daily,
+    rows_from_polymarket_holders,
+    rows_from_polymarket_open_interest,
+    rows_from_polymarket_price_history,
+    rows_from_polymarket_trades,
 )
 from data_ingestion.features import build_btc_risk_regimes, build_weather_monthly_normals
 from data_ingestion.storage import write_jsonl
@@ -75,6 +79,67 @@ class DataIngestionParsingTests(unittest.TestCase):
         self.assertEqual(rows[0]["open_time"], "2021-01-01T00:00:00+00:00")
         self.assertAlmostEqual(rows[0]["close"], 1.5)
         self.assertEqual(rows[0]["trade_count"], 20)
+
+    def test_polymarket_price_history_rows(self) -> None:
+        rows = rows_from_polymarket_price_history(
+            {"history": [{"t": 1609459200, "p": 0.42}]},
+            "token-1",
+            "1d",
+            collected_at="2026-05-16T00:00:00+00:00",
+        )
+
+        self.assertEqual(rows[0]["token_id"], "token-1")
+        self.assertEqual(rows[0]["timestamp_iso"], "2021-01-01T00:00:00+00:00")
+        self.assertAlmostEqual(rows[0]["price"], 0.42)
+
+    def test_polymarket_flow_rows(self) -> None:
+        trades = rows_from_polymarket_trades([{
+            "proxyWallet": "0xabc",
+            "conditionId": "0xcond",
+            "side": "BUY",
+            "size": "10",
+            "price": "0.51",
+            "timestamp": 1609459200,
+            "transactionHash": "0xtx",
+        }])
+        holders = rows_from_polymarket_holders([{
+            "token": "token-1",
+            "holders": [{"proxyWallet": "0xabc", "amount": "25", "outcomeIndex": 1}],
+        }])
+        oi = rows_from_polymarket_open_interest([{"market": "0xcond", "value": "1250.5"}])
+
+        self.assertEqual(trades[0]["condition_id"], "0xcond")
+        self.assertAlmostEqual(trades[0]["price"], 0.51)
+        self.assertEqual(holders[0]["token_id"], "token-1")
+        self.assertAlmostEqual(holders[0]["amount"], 25.0)
+        self.assertEqual(oi[0]["condition_id"], "0xcond")
+        self.assertAlmostEqual(oi[0]["open_interest"], 1250.5)
+
+    def test_polymarket_collector_uses_official_data_endpoints(self) -> None:
+        calls = []
+
+        def fake_get(url, params):
+            calls.append((url, params))
+            if url.endswith("/trades"):
+                return [{"conditionId": "0xcond", "price": "0.4"}]
+            if url.endswith("/holders"):
+                return [{"token": "token-1", "holders": [{"proxyWallet": "0xabc", "amount": "3"}]}]
+            if url.endswith("/oi"):
+                return [{"market": "0xcond", "value": "99"}]
+            if url.endswith("/activity"):
+                return [{"proxyWallet": "0xabc", "type": "TRADE", "timestamp": 1609459200}]
+            return {}
+
+        collector = DataCollector(get_json=fake_get, sleep_seconds=0.0)
+        self.assertEqual(len(collector.collect_polymarket_trades(["0xcond"], limit=5)), 1)
+        self.assertEqual(len(collector.collect_polymarket_holders(["0xcond"], limit=100)), 1)
+        self.assertEqual(len(collector.collect_polymarket_open_interest(["0xcond"])), 1)
+        self.assertEqual(len(collector.collect_polymarket_user_activity("0xabc", ["0xcond"])), 1)
+
+        self.assertEqual(calls[0][0], "https://data-api.polymarket.com/trades")
+        self.assertEqual(calls[0][1]["market"], "0xcond")
+        self.assertEqual(calls[1][1]["limit"], 20)
+        self.assertEqual(calls[3][1]["user"], "0xabc")
 
     def test_open_interest_paginates(self) -> None:
         calls = []

@@ -93,6 +93,48 @@ def run_collection(args) -> None:
             _write(data_root / "polymarket" / "orderbooks.jsonl", rows, append, args.dry_run)
             return
 
+        if source == "polymarket-price-history":
+            if not args.token_id:
+                raise SystemExit("--token-id is required for polymarket-price-history")
+            rows = collector.collect_polymarket_price_history(
+                args.token_id,
+                start,
+                end,
+                interval=args.history_interval,
+                fidelity=args.fidelity,
+            )
+            out = data_root / "polymarket" / f"price_history_{start.isoformat()}_{end.isoformat()}.jsonl"
+            _write(out, rows, append, args.dry_run)
+            return
+
+        if source == "polymarket-trades":
+            rows = collector.collect_polymarket_trades(args.condition_id, limit=args.limit)
+            _write(data_root / "polymarket" / "data_api_trades.jsonl", rows, append, args.dry_run)
+            return
+
+        if source == "polymarket-holders":
+            if not args.condition_id:
+                raise SystemExit("--condition-id is required for polymarket-holders")
+            rows = collector.collect_polymarket_holders(
+                args.condition_id,
+                limit=args.limit,
+                min_balance=args.min_balance,
+            )
+            _write(data_root / "polymarket" / "holders.jsonl", rows, append, args.dry_run)
+            return
+
+        if source == "polymarket-open-interest":
+            rows = collector.collect_polymarket_open_interest(args.condition_id)
+            _write(data_root / "polymarket" / "open_interest.jsonl", rows, append, args.dry_run)
+            return
+
+        if source == "polymarket-user-activity":
+            if not args.user:
+                raise SystemExit("--user is required for polymarket-user-activity")
+            rows = collector.collect_polymarket_user_activity(args.user, args.condition_id, limit=args.limit)
+            _write(data_root / "polymarket" / "user_activity.jsonl", rows, append, args.dry_run)
+            return
+
         if source == "weather-forecast":
             rows = collector.collect_weather_forecast(cities, days=args.days)
             _write(data_root / "weather" / f"forecasts_{dt.date.today().isoformat()}.jsonl", rows, append, args.dry_run)
@@ -160,6 +202,11 @@ def main() -> None:
             "all-lite",
             "polymarket-markets",
             "polymarket-orderbooks",
+            "polymarket-price-history",
+            "polymarket-trades",
+            "polymarket-holders",
+            "polymarket-open-interest",
+            "polymarket-user-activity",
             "weather-forecast",
             "weather-actuals",
             "metar",
@@ -182,6 +229,12 @@ def main() -> None:
     parser.add_argument("--query", default="temperature", help="Polymarket public-search query. Default: temperature.")
     parser.add_argument("--limit", type=int, default=100, help="Polymarket public-search limit. Default: 100.")
     parser.add_argument("--token-id", action="append", help="CLOB token id for orderbook collection. Repeatable.")
+    parser.add_argument("--condition-id", action="append", help="Polymarket condition id. Repeatable.")
+    parser.add_argument("--user", help="Polymarket user/profile wallet address for user activity.")
+    parser.add_argument("--min-balance", type=int, default=1, help="Minimum holder balance for holders. Default: 1.")
+    parser.add_argument("--history-interval", default="1d",
+                        help="Polymarket price-history interval: max, 1w, 1d, 6h, or 1h. Default: 1d.")
+    parser.add_argument("--fidelity", type=int, help="Optional Polymarket price-history fidelity/resolution.")
     parser.add_argument("--symbol", default="BTCUSDT", help="Binance symbol. Default: BTCUSDT.")
     parser.add_argument("--interval", default="1d", help="Binance kline interval. Default: 1d.")
     parser.add_argument("--period", default="1d", help="Binance futures stats period. Default: 1d.")
