@@ -46,6 +46,14 @@ ALIASES = {
 LIVE_COMMANDS = {"live_run_once", "enable_live", "open_trade"}
 
 
+def _utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def _utc_now_iso() -> str:
+    return _utc_now().isoformat()
+
+
 def _csv_set(raw: str | Iterable[str]) -> set[str]:
     if isinstance(raw, str):
         items = raw.split(",")
@@ -173,7 +181,7 @@ def parse_command(text: str) -> tuple[str, str]:
 
 
 def format_pnl_report(agent, *, interval_hours: float = 24.0, now: datetime.datetime | None = None) -> str:
-    now = now or datetime.datetime.utcnow()
+    now = now or _utc_now()
     since = now - datetime.timedelta(hours=interval_hours)
     positions = agent.positions
     summary = positions.summary()
@@ -472,7 +480,7 @@ class RemoteControlCommandHandler:
         if not self.policy.audit_log:
             return
         record = {
-            "ts": datetime.datetime.utcnow().isoformat(),
+            "ts": _utc_now_iso(),
             "chat_id": str(chat_id),
             "username": username,
             "command": command,

@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 POSITIONS_FILE = "positions.json"
 
 
+def _utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def _utc_now_iso() -> str:
+    return _utc_now().isoformat()
+
+
 @dataclass
 class Position:
     market_id: str
@@ -144,7 +152,7 @@ class PositionManager:
             current_price=entry_price,
             size_usd=size_usd,
             size_shares=shares,
-            opened_at=datetime.datetime.utcnow().isoformat(),
+            opened_at=_utc_now_iso(),
             bucket_low=bucket_low,
             bucket_high=bucket_high,
             target_date=target_date,
@@ -238,7 +246,7 @@ class PositionManager:
             trailing_active=pos.trailing_active,
             closed=True,
             close_reason=reason,
-            closed_at=datetime.datetime.utcnow().isoformat(),
+            closed_at=_utc_now_iso(),
             pnl_usd=pnl,
         )
         self.closed_positions.append(closed_fragment)
@@ -287,7 +295,7 @@ class PositionManager:
     def _close(self, pos: Position, reason: str) -> Position:
         pos.closed = True
         pos.close_reason = reason
-        pos.closed_at = datetime.datetime.utcnow().isoformat()
+        pos.closed_at = _utc_now_iso()
         shares = pos.size_shares or (pos.size_usd / max(pos.entry_price, 0.001))
         pos.pnl_usd = shares * pos.current_price - pos.size_usd
         del self.open_positions[pos.market_id]
@@ -358,7 +366,7 @@ class PositionManager:
         return count
 
     def risk_snapshot(self, now: datetime.datetime | None = None) -> dict:
-        now = now or datetime.datetime.utcnow()
+        now = now or _utc_now()
         day_start = datetime.datetime.combine(now.date(), datetime.time.min)
         realized_today = self.realized_pnl_since(day_start)
         unrealized = self.total_unrealized_pnl()

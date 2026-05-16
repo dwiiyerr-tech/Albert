@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 MEMORY_FILE = "memory.json"
 
 
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
+
+
 # ─── Data records ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -63,7 +67,7 @@ class PredictionRecord:
     trade_exit_ts: Optional[str] = None
     # Metadata
     agent_estimates: dict[str, float] = field(default_factory=dict)
-    created_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    created_ts: str = field(default_factory=_utc_now_iso)
 
     @property
     def prediction_error(self) -> Optional[float]:
@@ -107,7 +111,7 @@ class MarketObservation:
     spread: float
     volume: float
     hours_to_resolution: float
-    observed_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    observed_ts: str = field(default_factory=_utc_now_iso)
     target_date: str = ""
     # What actually happened (filled after resolution)
     resolved_yes: Optional[bool] = None
@@ -134,7 +138,7 @@ class Lesson:
     content: str            # natural-language lesson text
     confidence: float       # 0–1 how confident we are in this lesson
     supporting_records: list[str]  # PredictionRecord IDs
-    created_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    created_ts: str = field(default_factory=_utc_now_iso)
     times_applied: int = 0
     times_validated: int = 0  # how many times subsequent predictions confirmed it
     times_violated: int = 0   # how many times it was contradicted
@@ -191,7 +195,7 @@ class DebateTranscript:
     confidence_level: str
     turns: list[dict]
     scenarios: list[dict] = field(default_factory=list)
-    created_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    created_ts: str = field(default_factory=_utc_now_iso)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -356,7 +360,7 @@ class ExperienceMemory:
             rec = candidates[0]
             rec.trade_pnl_usd = pnl_usd
             rec.trade_close_reason = reason
-            rec.trade_exit_ts = datetime.datetime.utcnow().isoformat()
+            rec.trade_exit_ts = _utc_now_iso()
             return rec
 
     def add_lesson(self, lesson: Lesson) -> None:
@@ -454,7 +458,7 @@ class ExperienceMemory:
         rec.actual_temp_f = actual_temp_f
         rec.outcome_yes = outcome_yes
         rec.resolved = True
-        rec.resolution_ts = datetime.datetime.utcnow().isoformat()
+        rec.resolution_ts = _utc_now_iso()
         rec.resolution_source = resolution_source
         if pnl_usd is not None:
             rec.trade_pnl_usd = pnl_usd
