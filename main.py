@@ -243,14 +243,28 @@ class MiroWeatherAgent:
 
             if live_mode:
                 assert self.executor is not None
-                order_id = self.executor.place_exit_order(pos, token_id, exit_price)
-                if not order_id:
+                execution = self.executor.place_exit_order(pos, token_id, exit_price)
+                if not execution or not execution.has_fill:
                     logger.warning(
-                        "LIVE exit signal for %s %s but exit order failed; keeping position open",
+                        "LIVE exit signal for %s %s but no confirmed exit fill; keeping position open",
                         pos.direction, pos.city,
                     )
                     continue
-                closed = self.positions.close_position(pos.market_id, reason=reason)
+                closed = self.positions.reduce_position(
+                    pos.market_id,
+                    execution.average_price or exit_price,
+                    execution.filled_shares,
+                    reason=reason,
+                )
+                if closed and pos.market_id in self.positions.open_positions:
+                    logger.info(
+                        "LIVE partial exit for %s %s: filled %.4f/%.4f shares",
+                        pos.direction,
+                        pos.city,
+                        execution.filled_shares,
+                        execution.requested_shares,
+                    )
+                    closed = None
             else:
                 closed = self.positions.closed_positions[-1] if self.positions.closed_positions else None
 
@@ -935,31 +949,42 @@ class MiroWeatherAgent:
                     )
                     continue
 
-                order_id = self.executor.place_order(signal)
-                if order_id is None:
+                execution = self.executor.place_order(signal)
+                if execution is None:
                     logger.warning(
                         "LIVE: order submission failed for %s %s — position not opened",
                         signal.direction, signal.city,
                     )
                     continue
+                if not execution.has_fill:
+                    logger.warning(
+                        "LIVE: order %s has no confirmed fill (status=%s) — position not opened",
+                        execution.order_id, execution.status,
+                    )
+                    self.executor.cancel_order(execution.order_id)
+                    continue
 
+                entry_price = execution.average_price or signal.market_price
                 self.positions.open_position(
                     market_id=signal.market_id,
                     city=signal.city,
                     direction=signal.direction,
-                    entry_price=signal.market_price,
-                    size_usd=signal.recommended_usd,
+                    entry_price=entry_price,
+                    size_usd=execution.filled_usd,
+                    size_shares=execution.filled_shares,
                     bucket_low=signal.bucket_low,
                     bucket_high=signal.bucket_high,
                     target_date=signal.target_date,
-                    order_id=order_id or "",
+                    order_id=execution.order_id,
                     no_token_id=signal.no_token_id,
                 )
+                signal.recommended_usd = execution.filled_usd
                 self._attach_trade_metadata(signal)
                 logger.info(
-                    "LIVE TRADE: %s %s %s EV=%.3f $%.2f order_id=%s",
+                    "LIVE TRADE: %s %s %s EV=%.3f filled=$%.2f shares=%.4f order_id=%s",
                     signal.direction, signal.city, signal.target_date,
-                    signal.ev, signal.recommended_usd, order_id or "N/A",
+                    signal.ev, execution.filled_usd, execution.filled_shares,
+                    execution.order_id,
                 )
 
         # ── Step 9: Reports ───────────────────────────────────────────────────

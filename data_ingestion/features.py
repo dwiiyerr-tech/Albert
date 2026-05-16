@@ -77,6 +77,7 @@ def _single_value_by_date(rows: list[dict], date_field: str, value_field: str) -
 
 def _regime_label(
     ret_1d: Optional[float],
+    ret_7d: Optional[float],
     vol_30d_ann: Optional[float],
     drawdown: Optional[float],
     close: float,
@@ -85,11 +86,15 @@ def _regime_label(
 ) -> str:
     if ret_1d is not None and ret_1d <= -0.10:
         return "crash"
-    if drawdown is not None and drawdown <= -0.25:
+    if ret_7d is not None and ret_7d <= -0.20:
         return "crash"
     if vol_30d_ann is not None and vol_30d_ann >= 0.85:
         return "high_vol"
-    if drawdown is not None and drawdown <= -0.15:
+    if drawdown is not None and drawdown <= -0.35:
+        if ma_30 is not None and close >= ma_30:
+            return "recovery"
+        return "deep_drawdown"
+    if drawdown is not None and drawdown <= -0.15 and ma_30 is not None and close < ma_30:
         return "risk_off"
     if ma_30 is not None and ma_200 is not None and close < ma_30 < ma_200:
         return "risk_off"
@@ -106,7 +111,9 @@ def _risk_multiplier(
 ) -> float:
     base = {
         "crash": 0.25,
+        "deep_drawdown": 0.55,
         "high_vol": 0.50,
+        "recovery": 0.80,
         "risk_off": 0.65,
         "neutral": 1.00,
         "risk_on": 1.10,
@@ -145,6 +152,7 @@ def build_btc_risk_regimes(
         date = _date_key(row.get("open_time", ""))
         prev_close = closes[-1] if closes else None
         ret_1d = (close / prev_close - 1.0) if prev_close else None
+        ret_7d = (close / closes[-7] - 1.0) if len(closes) >= 7 else None
         if prev_close:
             log_returns.append(math.log(close / prev_close))
 
@@ -160,13 +168,14 @@ def build_btc_risk_regimes(
         funding_avg = funding.get(date)
         oi_value = open_interest.get(date)
         ls_ratio = long_short.get(date)
-        regime = _regime_label(ret_1d, vol_30d, drawdown, close, ma_30, ma_200)
+        regime = _regime_label(ret_1d, ret_7d, vol_30d, drawdown, close, ma_30, ma_200)
 
         out.append({
             "date": date,
             "symbol": row.get("symbol", "BTCUSDT"),
             "close": close,
             "ret_1d": round(ret_1d, 6) if ret_1d is not None else None,
+            "ret_7d": round(ret_7d, 6) if ret_7d is not None else None,
             "drawdown_from_ath": round(drawdown, 6) if drawdown is not None else None,
             "ma_7": round(ma_7, 6) if ma_7 is not None else None,
             "ma_30": round(ma_30, 6) if ma_30 is not None else None,

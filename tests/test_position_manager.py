@@ -115,6 +115,7 @@ class PositionManagerSettlementTests(unittest.TestCase):
             direction="YES",
             entry_price=0.50,
             size_usd=10.0,
+            size_shares=20.0,
             bucket_low=88,
             bucket_high=89,
             target_date="2026-05-17",
@@ -128,6 +129,46 @@ class PositionManagerSettlementTests(unittest.TestCase):
         self.assertEqual(snapshot["opened_today"], 1)
         self.assertGreater(snapshot["daily_loss_usd"], 0)
         self.assertGreater(snapshot["drawdown_usd"], 0)
+
+    def test_live_position_tracks_filled_shares_for_pnl(self) -> None:
+        manager = self._manager()
+        manager.open_position(
+            market_id="market-1",
+            city="Miami",
+            direction="YES",
+            entry_price=0.25,
+            size_usd=5.0,
+            size_shares=20.0,
+            bucket_low=88,
+            bucket_high=89,
+            target_date="2026-05-17",
+        )
+
+        manager.update_price("market-1", 0.50, close_on_trigger=False)
+
+        self.assertAlmostEqual(manager.open_positions["market-1"].unrealized_pnl_usd, 5.0)
+
+    def test_reduce_position_handles_partial_live_exit(self) -> None:
+        manager = self._manager()
+        manager.open_position(
+            market_id="market-1",
+            city="Miami",
+            direction="YES",
+            entry_price=0.25,
+            size_usd=10.0,
+            size_shares=40.0,
+            bucket_low=88,
+            bucket_high=89,
+            target_date="2026-05-17",
+        )
+
+        closed_fragment = manager.reduce_position("market-1", 0.50, 10.0, reason="stop_loss")
+
+        self.assertIsNotNone(closed_fragment)
+        self.assertIn("market-1", manager.open_positions)
+        self.assertAlmostEqual(closed_fragment.pnl_usd, 2.5)
+        self.assertAlmostEqual(manager.open_positions["market-1"].size_shares, 30.0)
+        self.assertAlmostEqual(manager.open_positions["market-1"].size_usd, 7.5)
 
 
 if __name__ == "__main__":

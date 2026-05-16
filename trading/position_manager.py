@@ -28,6 +28,7 @@ class Position:
     entry_price: float
     current_price: float
     size_usd: float
+    size_shares: float
     opened_at: str
     bucket_low: float
     bucket_high: float
@@ -49,14 +50,15 @@ class Position:
 
     @property
     def unrealized_pnl_usd(self) -> float:
-        return self.size_usd * self.unrealized_pnl_pct
+        shares = self.size_shares or (self.size_usd / max(self.entry_price, 0.001))
+        return shares * self.current_price - self.size_usd
 
     @property
     def planned_risk_usd(self) -> float:
-        if self.entry_price <= 0:
+        shares = self.size_shares or (self.size_usd / max(self.entry_price, 0.001))
+        if self.entry_price <= 0 or shares <= 0:
             return self.size_usd
-        risk_fraction = max(0.0, (self.entry_price - self.stop_price) / self.entry_price)
-        return self.size_usd * risk_fraction
+        return max(0.0, self.entry_price - self.stop_price) * shares
 
     def to_dict(self) -> dict:
         return self.__dict__
@@ -64,7 +66,12 @@ class Position:
     @classmethod
     def from_dict(cls, d: dict) -> "Position":
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in known})
+        payload = {k: v for k, v in d.items() if k in known}
+        if "size_shares" not in payload:
+            entry = float(payload.get("entry_price") or 0.0)
+            size = float(payload.get("size_usd") or 0.0)
+            payload["size_shares"] = size / max(entry, 0.001)
+        return cls(**payload)
 
 
 class PositionManager:
@@ -118,11 +125,13 @@ class PositionManager:
         target_date: str,
         order_id: str = "",
         no_token_id: str = "",
+        size_shares: float = 0.0,
     ) -> Position:
         # The executor buys the selected outcome token. YES and NO positions are
         # both long token exposures, so loss control is below the entry price.
         direction = direction.upper()
         stop = entry_price * (1 - STOP_LOSS_PCT)
+        shares = size_shares or (size_usd / max(entry_price, 0.001))
 
         pos = Position(
             market_id=market_id,
@@ -131,6 +140,7 @@ class PositionManager:
             entry_price=entry_price,
             current_price=entry_price,
             size_usd=size_usd,
+            size_shares=shares,
             opened_at=datetime.datetime.utcnow().isoformat(),
             bucket_low=bucket_low,
             bucket_high=bucket_high,
@@ -185,6 +195,60 @@ class PositionManager:
             return None
         return self._close(pos, reason)
 
+    def reduce_position(
+        self,
+        market_id: str,
+        exit_price: float,
+        size_shares: float,
+        reason: str = "partial_exit",
+    ) -> Optional[Position]:
+        """Reduce a live position after a partial exit fill."""
+        pos = self.open_positions.get(market_id)
+        if not pos or size_shares <= 0:
+            return None
+        total_shares = pos.size_shares or (pos.size_usd / max(pos.entry_price, 0.001))
+        if total_shares <= 0:
+            return None
+        if size_shares >= total_shares * 0.999:
+            pos.current_price = exit_price
+            return self._close(pos, reason)
+
+        share_fraction = max(0.0, min(1.0, size_shares / total_shares))
+        cost_basis = pos.size_usd * share_fraction
+        pnl = size_shares * exit_price - cost_basis
+
+        closed_fragment = Position(
+            market_id=pos.market_id,
+            city=pos.city,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            current_price=exit_price,
+            size_usd=cost_basis,
+            size_shares=size_shares,
+            opened_at=pos.opened_at,
+            bucket_low=pos.bucket_low,
+            bucket_high=pos.bucket_high,
+            target_date=pos.target_date,
+            order_id=pos.order_id,
+            no_token_id=pos.no_token_id,
+            stop_price=pos.stop_price,
+            trailing_active=pos.trailing_active,
+            closed=True,
+            close_reason=reason,
+            closed_at=datetime.datetime.utcnow().isoformat(),
+            pnl_usd=pnl,
+        )
+        self.closed_positions.append(closed_fragment)
+
+        pos.size_usd -= cost_basis
+        pos.size_shares = total_shares - size_shares
+        pos.current_price = exit_price
+        logger.info(
+            "Reduced %s %s: shares=%.4f reason=%s, PnL=%.2f",
+            pos.city, pos.market_id, size_shares, reason, pnl,
+        )
+        return closed_fragment
+
     def resolve_position(
         self,
         market_id: str,
@@ -221,8 +285,8 @@ class PositionManager:
         pos.closed = True
         pos.close_reason = reason
         pos.closed_at = datetime.datetime.utcnow().isoformat()
-        pnl_per_dollar = (pos.current_price - pos.entry_price) / pos.entry_price
-        pos.pnl_usd = pos.size_usd * pnl_per_dollar
+        shares = pos.size_shares or (pos.size_usd / max(pos.entry_price, 0.001))
+        pos.pnl_usd = shares * pos.current_price - pos.size_usd
         del self.open_positions[pos.market_id]
         self.closed_positions.append(pos)
         logger.info(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -23,6 +24,28 @@ from config import IOC_URGENCY_HOURS, ORDER_RETRY_MAX
 logger = logging.getLogger(__name__)
 
 _POLYGON_CHAIN_ID = 137   # Polygon mainnet where Polymarket lives
+
+
+@dataclass
+class OrderExecution:
+    order_id: str
+    token_id: str
+    side: str
+    limit_price: float
+    requested_shares: float
+    requested_usd: float
+    filled_shares: float = 0.0
+    filled_usd: float = 0.0
+    average_price: float = 0.0
+    status: str = "submitted"
+
+    @property
+    def has_fill(self) -> bool:
+        return self.filled_shares > 0 and self.filled_usd > 0
+
+    @property
+    def is_fully_filled(self) -> bool:
+        return self.has_fill and self.filled_shares >= self.requested_shares * 0.999
 
 
 class PolymarketOrderExecutor:
@@ -112,7 +135,7 @@ class PolymarketOrderExecutor:
             and self._client is not None
         )
 
-    def place_order(self, signal: "TradeSignal") -> Optional[str]:
+    def place_order(self, signal: "TradeSignal") -> Optional[OrderExecution]:
         """
         Sign and submit a limit order with automatic retry and urgency-aware order type.
 
@@ -121,7 +144,7 @@ class PolymarketOrderExecutor:
           otherwise                                → GTC (Good-Till-Cancelled)
 
         Retries up to ORDER_RETRY_MAX times with exponential backoff (1s, 2s, 4s).
-        Returns the CLOB order_id on success, None after all retries fail.
+        Returns fill-aware execution details on success, None after all retries fail.
         """
         if not self.is_configured():
             return None
@@ -144,8 +167,8 @@ class PolymarketOrderExecutor:
         )
         return None
 
-    def _attempt_place_order(self, signal: "TradeSignal") -> Optional[str]:
-        """Single order submission attempt. Returns order_id or None."""
+    def _attempt_place_order(self, signal: "TradeSignal") -> Optional[OrderExecution]:
+        """Single order submission attempt. Returns execution details or None."""
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.constants import BUY
@@ -165,7 +188,11 @@ class PolymarketOrderExecutor:
                 return None
 
             price = round(max(0.001, min(0.999, price)), 4)
-            size = round(signal.recommended_usd, 2)
+            requested_usd = round(signal.recommended_usd, 4)
+            size = self._shares_for_usd(requested_usd, price)
+            if size <= 0:
+                logger.warning("Order size is zero for %s %s", signal.direction, signal.city)
+                return None
 
             # Use IOC for urgent markets — fills immediately at best price or cancels.
             # Use GTC for markets with time — waits for a matching counterparty.
@@ -190,13 +217,22 @@ class PolymarketOrderExecutor:
 
             if order_id:
                 logger.info(
-                    "LIVE ORDER [%s]: %s %s @ %.4f $%.2f → %s",
-                    order_type, signal.direction, signal.city, price, size, order_id,
+                    "LIVE ORDER [%s]: %s %s @ %.4f shares=%.4f notional≈$%.2f → %s",
+                    order_type, signal.direction, signal.city, price, size, requested_usd, order_id,
                 )
             else:
                 logger.warning("Order posted but no order_id in response: %s", response)
+                return None
 
-            return order_id
+            return self._execution_from_response(
+                response=response,
+                order_id=order_id,
+                token_id=token_id,
+                side=BUY,
+                limit_price=price,
+                requested_shares=size,
+                requested_usd=requested_usd,
+            )
 
         except Exception as exc:
             logger.warning(
@@ -222,13 +258,13 @@ class PolymarketOrderExecutor:
         position: "Position",
         token_id: str,
         price: float,
-    ) -> Optional[str]:
+    ) -> Optional[OrderExecution]:
         """
         Best-effort live exit for a locally tracked position.
 
         The local position manager measures `size_usd` as cost basis. CLOB sell
         size is token shares, so we convert cost basis to approximate shares
-        using entry price. Returns order_id on success, None on failure.
+        using filled shares. Returns execution details on success, None on failure.
         """
         if not self.is_configured() or not token_id:
             return None
@@ -237,7 +273,11 @@ class PolymarketOrderExecutor:
             from py_clob_client.constants import SELL
 
             exit_price = round(max(0.001, min(0.999, price)), 4)
-            shares = round(position.size_usd / max(position.entry_price, 0.001), 2)
+            shares = round(
+                position.size_shares
+                or (position.size_usd / max(position.entry_price, 0.001)),
+                4,
+            )
             order_args = OrderArgs(
                 token_id=token_id,
                 price=exit_price,
@@ -260,7 +300,16 @@ class PolymarketOrderExecutor:
                 )
             else:
                 logger.warning("Exit order posted but no order_id in response: %s", response)
-            return order_id
+                return None
+            return self._execution_from_response(
+                response=response,
+                order_id=order_id,
+                token_id=token_id,
+                side=SELL,
+                limit_price=exit_price,
+                requested_shares=shares,
+                requested_usd=round(shares * exit_price, 4),
+            )
 
         except Exception as exc:
             logger.warning(
@@ -268,6 +317,119 @@ class PolymarketOrderExecutor:
                 position.direction, position.city, exc,
             )
             return None
+
+    def _shares_for_usd(self, amount_usd: float, price: float) -> float:
+        """Convert USDC notional into CLOB outcome-token shares."""
+        if amount_usd <= 0 or price <= 0:
+            return 0.0
+        return round(amount_usd / price, 4)
+
+    def _extract_order_id(self, response) -> Optional[str]:
+        if isinstance(response, dict):
+            return response.get("orderID") or response.get("order_id") or response.get("id")
+        if hasattr(response, "order_id"):
+            return response.order_id
+        if hasattr(response, "orderID"):
+            return response.orderID
+        return None
+
+    def _as_dict(self, value) -> dict:
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "dict"):
+            try:
+                data = value.dict()
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+        if hasattr(value, "__dict__"):
+            return dict(value.__dict__)
+        return {}
+
+    def _numeric(self, data: dict, *keys: str) -> float:
+        for key in keys:
+            raw = data.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _order_snapshot(self, order_id: str) -> dict:
+        if not self.is_configured() or not order_id:
+            return {}
+        try:
+            raw = self._client.get_order(order_id)
+            return self._as_dict(raw)
+        except Exception as exc:
+            logger.debug("get_order %s failed: %s", order_id, exc)
+            return {}
+
+    def _execution_from_response(
+        self,
+        response,
+        order_id: str,
+        token_id: str,
+        side: str,
+        limit_price: float,
+        requested_shares: float,
+        requested_usd: float,
+    ) -> OrderExecution:
+        data = self._as_dict(response)
+        if order_id:
+            snapshot = self._order_snapshot(order_id)
+            if snapshot:
+                data = {**data, **snapshot}
+
+        status = str(data.get("status") or data.get("state") or "submitted").lower()
+        filled_shares = self._numeric(
+            data,
+            "filled_size",
+            "filledSize",
+            "matched_size",
+            "matchedSize",
+            "size_matched",
+            "sizeMatched",
+            "filled",
+        )
+        remaining_shares = self._numeric(data, "remaining_size", "remainingSize", "size_remaining")
+        original_shares = self._numeric(data, "original_size", "originalSize", "size")
+        if filled_shares <= 0 and original_shares > 0 and remaining_shares > 0:
+            filled_shares = max(0.0, original_shares - remaining_shares)
+
+        average_price = self._numeric(
+            data,
+            "average_price",
+            "averagePrice",
+            "avg_price",
+            "avgPrice",
+            "price",
+        ) or limit_price
+        filled_usd = self._numeric(
+            data,
+            "filled_amount",
+            "filledAmount",
+            "matched_amount",
+            "matchedAmount",
+            "notional",
+        )
+        if filled_usd <= 0 and filled_shares > 0:
+            filled_usd = filled_shares * average_price
+
+        return OrderExecution(
+            order_id=order_id,
+            token_id=token_id,
+            side=side,
+            limit_price=limit_price,
+            requested_shares=requested_shares,
+            requested_usd=requested_usd,
+            filled_shares=round(filled_shares, 6),
+            filled_usd=round(filled_usd, 6),
+            average_price=round(average_price, 6),
+            status=status,
+        )
 
     def get_balance(self) -> float:
         """Return available USDC balance in dollars. Returns 0.0 on failure."""

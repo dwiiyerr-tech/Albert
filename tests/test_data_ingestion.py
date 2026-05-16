@@ -126,6 +126,23 @@ class DataIngestionParsingTests(unittest.TestCase):
         self.assertEqual(rows[-1]["regime"], "crash")
         self.assertLess(rows[-1]["risk_multiplier"], 1.0)
 
+    def test_btc_regime_builder_separates_deep_drawdown_from_crash(self) -> None:
+        candles = []
+        for i in range(260):
+            close = 100.0 + i
+            if i >= 220:
+                close = 180.0 + ((i - 220) * 0.2)
+            candles.append({
+                "symbol": "BTCUSDT",
+                "open_time": (dt.date(2021, 1, 1) + dt.timedelta(days=i)).isoformat(),
+                "close": close,
+            })
+
+        rows = build_btc_risk_regimes(candles)
+
+        self.assertIn(rows[-1]["regime"], {"deep_drawdown", "recovery"})
+        self.assertNotEqual(rows[-1]["regime"], "crash")
+
     def test_weather_normals_group_by_city_month(self) -> None:
         rows = build_weather_monthly_normals([
             {"city": "Dallas", "date": "2021-01-01", "temperature_2m_max_c": 10, "temperature_2m_min_c": 1},
