@@ -58,6 +58,18 @@ from config import (
     POLYMARKET_PRIVATE_KEY,
     POLYMARKET_PROXY_ADDRESS,
     POLYMARKET_BASE,
+    REMOTE_CONTROL_ENABLED,
+    REMOTE_CONTROL_PROVIDER,
+    TELEGRAM_BOT_TOKEN,
+    REMOTE_ALLOWED_CHAT_IDS,
+    REMOTE_ALLOWED_COMMANDS,
+    REMOTE_ALLOW_LIVE,
+    REMOTE_AUDIT_LOG,
+    REMOTE_POLL_INTERVAL_SECONDS,
+    REMOTE_DEMO_BALANCE,
+    REMOTE_DEMO_POSITIONS_FILE,
+    REMOTE_DEMO_TOKEN_BUDGET,
+    REMOTE_DEMO_SIM_ROUNDS,
 )
 from utils import setup_logging
 from weather_data import fetch_city_forecast, CityForecast, get_historical_temp
@@ -1183,6 +1195,97 @@ class MiroWeatherAgent:
         dashboard.run()
 
 
+def _run_telegram_control(args) -> None:
+    """Start Telegram remote control, optionally with a managed dry daemon."""
+    if REMOTE_CONTROL_PROVIDER != "telegram":
+        raise RuntimeError(f"Unsupported REMOTE_CONTROL_PROVIDER={REMOTE_CONTROL_PROVIDER!r}")
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is required. Run python main.py --setup first.")
+
+    from remote_control import (
+        RemoteControlCommandHandler,
+        RemoteControlPolicy,
+        TelegramRemoteControlBot,
+    )
+
+    remote_live = bool(args.live and REMOTE_ALLOW_LIVE)
+    if args.live and not REMOTE_ALLOW_LIVE:
+        logger.warning("Ignoring --live for Telegram control because REMOTE_ALLOW_LIVE=false")
+
+    agent = MiroWeatherAgent(dry_run=not remote_live)
+    policy = RemoteControlPolicy.from_strings(
+        allowed_chat_ids=REMOTE_ALLOWED_CHAT_IDS,
+        allowed_commands=REMOTE_ALLOWED_COMMANDS,
+        allow_live=REMOTE_ALLOW_LIVE,
+        audit_log=REMOTE_AUDIT_LOG,
+    )
+    if not policy.allowed_chat_ids:
+        logger.warning(
+            "REMOTE_ALLOWED_CHAT_IDS is empty. Only /whoami and /help will work until a chat ID is configured."
+        )
+
+    def _demo_runner() -> str:
+        from demo.session import DemoSession
+
+        session = DemoSession(
+            virtual_balance=REMOTE_DEMO_BALANCE,
+            max_cycles=1,
+            cycle_interval_seconds=0,
+            token_budget=REMOTE_DEMO_TOKEN_BUDGET,
+        )
+        session.install_token_tracking()
+        demo_agent = MiroWeatherAgent(
+            dry_run=False,
+            demo_session=session,
+            positions_file=REMOTE_DEMO_POSITIONS_FILE,
+        )
+        demo_agent._ensure_llm_stack()
+        assert demo_agent.simulator is not None
+        demo_agent.simulator._sim_rounds = REMOTE_DEMO_SIM_ROUNDS
+        demo_agent.run_demo(days_ahead=args.days_ahead)
+        trades_executed = sum(1 for trade in session._trades if trade.executed)
+        return (
+            f"Signals: {sum(c.signals_found for c in session._cycles)}\n"
+            f"Trades: {trades_executed}\n"
+            f"Errors: {len(session._errors)}\n"
+            f"Virtual balance: ${session.wallet.available(demo_agent.positions):.2f}\n"
+            f"Positions file: {REMOTE_DEMO_POSITIONS_FILE}"
+        )
+
+    handler = RemoteControlCommandHandler(
+        agent,
+        policy,
+        days_ahead=args.days_ahead,
+        demo_runner=_demo_runner,
+    )
+
+    if args.daemon:
+        def _daemon_loop() -> None:
+            logger.info("Starting remote-managed dry daemon")
+            while True:
+                if handler.paused:
+                    time.sleep(5)
+                    continue
+                try:
+                    signals = handler.run_daemon_cycle()
+                    logger.info("Remote daemon cycle complete: %d signals", len(signals))
+                except Exception as exc:
+                    logger.error("Remote daemon cycle error: %s", exc, exc_info=True)
+                sleep_until = time.monotonic() + UPDATE_INTERVAL_SECONDS
+                while time.monotonic() < sleep_until:
+                    time.sleep(min(5.0, sleep_until - time.monotonic()))
+
+        threading.Thread(target=_daemon_loop, name="telegram-daemon", daemon=True).start()
+
+    bot = TelegramRemoteControlBot(
+        token=TELEGRAM_BOT_TOKEN,
+        handler=handler,
+        poll_interval_seconds=REMOTE_POLL_INTERVAL_SECONDS,
+    )
+    logger.info("Telegram control ready. Send /whoami to the bot to verify chat ID.")
+    bot.run_forever()
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -1195,6 +1298,8 @@ def main() -> None:
                         help="Force dry-run mode for --run/--daemon, ignoring DEFAULT_MODE")
     parser.add_argument("--daemon", action="store_true",
                         help="Run continuously every hour")
+    parser.add_argument("--telegram-control", "--remote-control", action="store_true",
+                        help="Run Telegram remote-control bot (safe commands only by default)")
     parser.add_argument("--positions", action="store_true",
                         help="Show current position summary")
     parser.add_argument("--learning-status", action="store_true",
@@ -1235,16 +1340,31 @@ def main() -> None:
         run_wizard()
         return
 
-    explicit_mode = args.demo or args.live or args.dry
-    has_run_command = any([
+    if REMOTE_CONTROL_ENABLED and not any([
         args.run,
         args.daemon,
         args.tui,
         args.positions,
         args.learning_status,
         args.reflect,
+        args.demo,
+        args.live,
+        args.dry,
+        args.telegram_control,
+    ]):
+        args.telegram_control = True
+
+    explicit_mode = args.demo or args.live or args.dry
+    has_run_command = any([
+        args.run,
+        args.daemon,
+        args.telegram_control,
+        args.tui,
+        args.positions,
+        args.learning_status,
+        args.reflect,
     ])
-    if has_run_command and not explicit_mode:
+    if has_run_command and not explicit_mode and not args.telegram_control:
         if DEFAULT_MODE == "demo" and (args.run or args.daemon):
             args.demo = True
             if args.daemon:
@@ -1256,6 +1376,10 @@ def main() -> None:
     if args.dry:
         args.demo = False
         args.live = False
+
+    if args.telegram_control:
+        _run_telegram_control(args)
+        return
 
     if args.demo:
         # Demo must patch LLMClient before MiroWeatherAgent creates LLM clients.

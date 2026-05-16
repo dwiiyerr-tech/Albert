@@ -77,6 +77,9 @@ python main.py --run --days-ahead 2
 
 # 7. Live trading mode (requires POLYMARKET_API_KEY)
 python main.py --run --live
+
+# 8. Telegram remote control (safe commands only by default)
+python main.py --telegram-control
 ```
 
 ---
@@ -199,6 +202,49 @@ python main.py --demo --demo-cycles 1 --demo-positions-file .demo_runs/albert_cl
 
 ---
 
+## Telegram Remote Control
+
+Albert can run a Telegram polling bot for remote status checks and controlled
+demo/dry-run execution. Live trading is blocked by default.
+
+```bash
+python main.py --setup
+python main.py --telegram-control
+```
+
+Safe command set:
+
+```text
+/whoami        show your Telegram chat ID
+/status        mode, cycle, risk, and portfolio summary
+/positions     open/closed position summary
+/signals       latest cycle signals
+/learning      learning and persona score summary
+/dry_run_once  run one dry-run cycle
+/demo_once     run one isolated virtual demo cycle
+/pause         pause remote-managed daemon loop
+/resume        resume remote-managed daemon loop
+```
+
+Recommended `.env` baseline:
+
+```env
+REMOTE_CONTROL_ENABLED=false
+REMOTE_CONTROL_PROVIDER=telegram
+TELEGRAM_BOT_TOKEN=123456:bot-token-from-botfather
+REMOTE_ALLOWED_CHAT_IDS=123456789
+REMOTE_ALLOWED_COMMANDS=status,positions,signals,learning,pause,resume,dry_run_once,demo_once
+REMOTE_ALLOW_LIVE=false
+REMOTE_AUDIT_LOG=remote_control.log
+REMOTE_DEMO_POSITIONS_FILE=.demo_runs/telegram_demo_positions.json
+```
+
+To discover your chat ID, start the bot with `python main.py --telegram-control`,
+send `/whoami`, then add the returned ID to `REMOTE_ALLOWED_CHAT_IDS` by rerunning
+the setup wizard locally.
+
+---
+
 ## Project Structure
 
 ```
@@ -213,6 +259,8 @@ Albert/
 ├── data_ingestion/
 │   ├── collectors.py          # Polymarket, weather, and BTC collectors
 │   └── storage.py             # JSONL/date helpers
+├── remote_control/
+│   └── telegram_bot.py        # Telegram polling + command allowlist
 ├── simulation/
 │   ├── agents.py              # Multi-agent debate (MiroFish-inspired)
 │   ├── knowledge_graph.py     # City climatology + model accuracy graph

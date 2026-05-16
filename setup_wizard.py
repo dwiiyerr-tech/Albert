@@ -243,6 +243,12 @@ def _save_env(settings: dict[str, str]) -> None:
          ["VISUAL_CROSSING_API_KEY"]),
         ("# ─── Trading Mode ────────────────────────────────────────────────────────",
          ["DEFAULT_MODE"]),
+        ("# ─── Remote Control / Telegram ─────────────────────────────────────────",
+         ["REMOTE_CONTROL_ENABLED", "REMOTE_CONTROL_PROVIDER", "TELEGRAM_BOT_TOKEN",
+          "REMOTE_ALLOWED_CHAT_IDS", "REMOTE_ALLOWED_COMMANDS", "REMOTE_ALLOW_LIVE",
+          "REMOTE_AUDIT_LOG", "REMOTE_POLL_INTERVAL_SECONDS",
+          "REMOTE_DEMO_BALANCE", "REMOTE_DEMO_POSITIONS_FILE",
+          "REMOTE_DEMO_TOKEN_BUDGET", "REMOTE_DEMO_SIM_ROUNDS"]),
         ("# ─── Risk Parameters ────────────────────────────────────────────────────",
          ["MIN_EV", "KELLY_FRACTION", "MAX_TRADE_SIZE_USD", "STOP_LOSS_PCT", "TRAILING_STOP_TRIGGER"]),
         ("# ─── Market Filters ─────────────────────────────────────────────────────",
@@ -429,6 +435,97 @@ def _step_trading_mode(existing: dict, settings: dict, step: int, total: int) ->
         console.print("  [dim]Override at runtime with: python main.py --live  or  --demo[/]")
 
 
+def _step_remote_control(existing: dict, settings: dict, step: int, total: int) -> None:
+    _header(step, total, "Remote Control / Telegram")
+
+    enabled = _prompt_bool(
+        "Enable Telegram remote control?",
+        default=existing.get("REMOTE_CONTROL_ENABLED", "false").lower() == "true",
+        description="Default is off. Remote commands are allowlisted and live trading is blocked by default.",
+    )
+    settings["REMOTE_CONTROL_ENABLED"] = "true" if enabled else "false"
+    settings["REMOTE_CONTROL_PROVIDER"] = "telegram"
+
+    existing_token = existing.get("TELEGRAM_BOT_TOKEN", "")
+    console.print()
+    console.print("  [bold]TELEGRAM_BOT_TOKEN[/] [dim](from @BotFather)[/]")
+    if existing_token:
+        console.print(f"  [dim]Current: {_mask(existing_token)}[/]")
+    token = _prompt_secret("  Enter bot token", required=enabled and not existing_token, current=existing_token)
+    settings["TELEGRAM_BOT_TOKEN"] = token or existing_token
+
+    console.print()
+    settings["REMOTE_ALLOWED_CHAT_IDS"] = _prompt_str(
+        "REMOTE_ALLOWED_CHAT_IDS",
+        default=existing.get("REMOTE_ALLOWED_CHAT_IDS", ""),
+        required=False,
+        description="Comma-separated Telegram chat IDs allowed to control Albert. Use /whoami to discover yours.",
+    )
+    console.print()
+    settings["REMOTE_ALLOWED_COMMANDS"] = _prompt_str(
+        "REMOTE_ALLOWED_COMMANDS",
+        default=existing.get(
+            "REMOTE_ALLOWED_COMMANDS",
+            "status,positions,signals,learning,pause,resume,dry_run_once,demo_once",
+        ),
+        required=False,
+        description="Comma-separated command allowlist. Keep live commands out for safety.",
+    )
+    console.print()
+    allow_live = _prompt_bool(
+        "REMOTE_ALLOW_LIVE",
+        default=existing.get("REMOTE_ALLOW_LIVE", "false").lower() == "true",
+        description="Dangerous: allows future live remote commands. Recommended: No.",
+    )
+    settings["REMOTE_ALLOW_LIVE"] = "true" if allow_live else "false"
+    if allow_live:
+        console.print("  [bold yellow]⚠  Review wallet exposure before enabling any live remote command.[/]")
+
+    console.print()
+    settings["REMOTE_AUDIT_LOG"] = _prompt_str(
+        "REMOTE_AUDIT_LOG",
+        default=existing.get("REMOTE_AUDIT_LOG", "remote_control.log"),
+        required=False,
+        description="JSONL log for every remote command attempt.",
+    )
+    console.print()
+    settings["REMOTE_POLL_INTERVAL_SECONDS"] = str(_prompt_float(
+        "REMOTE_POLL_INTERVAL_SECONDS",
+        default=float(existing.get("REMOTE_POLL_INTERVAL_SECONDS", "2.0")),
+        description="Seconds between Telegram polling retries after empty/error responses.",
+        min_val=0.5,
+    ))
+    console.print()
+    settings["REMOTE_DEMO_BALANCE"] = str(_prompt_float(
+        "REMOTE_DEMO_BALANCE",
+        default=float(existing.get("REMOTE_DEMO_BALANCE", "1000.0")),
+        description="Virtual wallet balance used by /demo_once.",
+        min_val=1.0,
+    ))
+    console.print()
+    settings["REMOTE_DEMO_POSITIONS_FILE"] = _prompt_str(
+        "REMOTE_DEMO_POSITIONS_FILE",
+        default=existing.get("REMOTE_DEMO_POSITIONS_FILE", ".demo_runs/telegram_demo_positions.json"),
+        required=False,
+        description="Separate demo position state for Telegram-triggered demo runs.",
+    )
+    console.print()
+    settings["REMOTE_DEMO_TOKEN_BUDGET"] = str(_prompt_int(
+        "REMOTE_DEMO_TOKEN_BUDGET",
+        default=int(existing.get("REMOTE_DEMO_TOKEN_BUDGET", "200000")),
+        description="Input token warning budget for /demo_once.",
+        min_val=1000,
+    ))
+    console.print()
+    settings["REMOTE_DEMO_SIM_ROUNDS"] = str(_prompt_int(
+        "REMOTE_DEMO_SIM_ROUNDS",
+        default=int(existing.get("REMOTE_DEMO_SIM_ROUNDS", "1")),
+        description="Debate rounds per city for /demo_once.",
+        min_val=1,
+        max_val=10,
+    ))
+
+
 def _step_risk(existing: dict, settings: dict, step: int, total: int) -> None:
     _header(step, total, "Risk Parameters")
 
@@ -563,7 +660,8 @@ def _step_review(settings: dict, step: int, total: int) -> bool:
 
     # Sensitive keys — shown masked; everything else shown plainly
     _SECRET_KEYS = {"LLM_API_KEY", "ANTHROPIC_API_KEY", "POLYMARKET_API_KEY",
-                    "POLYMARKET_PRIVATE_KEY", "VISUAL_CROSSING_API_KEY"}
+                    "POLYMARKET_PRIVATE_KEY", "VISUAL_CROSSING_API_KEY",
+                    "TELEGRAM_BOT_TOKEN"}
 
     table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
     table.add_column("Setting", style="bold", min_width=30)
@@ -574,6 +672,12 @@ def _step_review(settings: dict, step: int, total: int) -> bool:
         "Polymarket Wallet":  ["POLYMARKET_API_KEY", "POLYMARKET_PRIVATE_KEY", "POLYMARKET_PROXY_ADDRESS"],
         "Weather Data":       ["VISUAL_CROSSING_API_KEY"],
         "Trading Mode":       ["DEFAULT_MODE"],
+        "Remote Control":     ["REMOTE_CONTROL_ENABLED", "REMOTE_CONTROL_PROVIDER",
+                               "TELEGRAM_BOT_TOKEN", "REMOTE_ALLOWED_CHAT_IDS",
+                               "REMOTE_ALLOWED_COMMANDS", "REMOTE_ALLOW_LIVE",
+                               "REMOTE_AUDIT_LOG", "REMOTE_POLL_INTERVAL_SECONDS",
+                               "REMOTE_DEMO_BALANCE", "REMOTE_DEMO_POSITIONS_FILE",
+                               "REMOTE_DEMO_TOKEN_BUDGET", "REMOTE_DEMO_SIM_ROUNDS"],
         "Risk Parameters":    ["MIN_EV", "KELLY_FRACTION", "MAX_TRADE_SIZE_USD", "STOP_LOSS_PCT", "TRAILING_STOP_TRIGGER"],
         "Market Filters":     ["MIN_VOLUME", "MAX_SPREAD", "MIN_HOURS_TO_RESOLUTION", "MAX_HOURS_TO_RESOLUTION"],
         "Simulation":         ["SIM_ROUNDS", "SCENARIO_SPECULATION", "HIGH_SPREAD_THRESHOLD_F",
@@ -606,7 +710,7 @@ def _step_review(settings: dict, step: int, total: int) -> bool:
 def run_wizard() -> None:
     existing = _read_existing_env()
     settings: dict[str, str] = {}
-    STEPS = 7
+    STEPS = 8
 
     console.print()
     console.print(Panel(
@@ -624,11 +728,12 @@ def run_wizard() -> None:
     _step_llm(existing, settings, 1, STEPS)
     _step_wallet(existing, settings, 2, STEPS)
     _step_trading_mode(existing, settings, 3, STEPS)
-    _step_risk(existing, settings, 4, STEPS)
-    _step_filters(existing, settings, 5, STEPS)
-    _step_simulation(existing, settings, 6, STEPS)
+    _step_remote_control(existing, settings, 4, STEPS)
+    _step_risk(existing, settings, 5, STEPS)
+    _step_filters(existing, settings, 6, STEPS)
+    _step_simulation(existing, settings, 7, STEPS)
 
-    if not _step_review(settings, 7, STEPS):
+    if not _step_review(settings, 8, STEPS):
         console.print("\n  [yellow]Settings not saved. Run the wizard again to configure.[/]")
         return
 
@@ -642,6 +747,7 @@ def run_wizard() -> None:
             "  [bold]python main.py --daemon[/]       continuous, dry-run\n"
             "  [bold]python main.py --tui[/]          real-time dashboard\n"
             "  [bold]python main.py --demo[/]         paper-trading demo\n"
+            "  [bold]python main.py --telegram-control[/] remote Telegram control\n"
             "  [bold]python main.py --live --run[/]   live trading (real money)\n\n"
             "Re-run [bold]python main.py --setup[/] at any time to change settings."
         ),

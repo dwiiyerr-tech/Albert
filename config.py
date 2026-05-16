@@ -104,6 +104,26 @@ POLYMARKET_PROXY_ADDRESS: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "dry").lower()
 DEMO_POSITIONS_FILE = os.getenv("DEMO_POSITIONS_FILE", "positions_demo.json")
 
+# ─── Remote Control / Telegram Bot ───────────────────────────────────────────
+REMOTE_CONTROL_ENABLED = os.getenv("REMOTE_CONTROL_ENABLED", "false").lower() == "true"
+REMOTE_CONTROL_PROVIDER = os.getenv("REMOTE_CONTROL_PROVIDER", "telegram").lower()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+REMOTE_ALLOWED_CHAT_IDS = os.getenv("REMOTE_ALLOWED_CHAT_IDS", "")
+REMOTE_ALLOWED_COMMANDS = os.getenv(
+    "REMOTE_ALLOWED_COMMANDS",
+    "status,positions,signals,learning,pause,resume,dry_run_once,demo_once",
+)
+REMOTE_ALLOW_LIVE = os.getenv("REMOTE_ALLOW_LIVE", "false").lower() == "true"
+REMOTE_AUDIT_LOG = os.getenv("REMOTE_AUDIT_LOG", "remote_control.log")
+REMOTE_POLL_INTERVAL_SECONDS = float(os.getenv("REMOTE_POLL_INTERVAL_SECONDS", "2.0"))
+REMOTE_DEMO_BALANCE = float(os.getenv("REMOTE_DEMO_BALANCE", "1000.0"))
+REMOTE_DEMO_POSITIONS_FILE = os.getenv(
+    "REMOTE_DEMO_POSITIONS_FILE",
+    os.path.join(".demo_runs", "telegram_demo_positions.json"),
+)
+REMOTE_DEMO_TOKEN_BUDGET = int(os.getenv("REMOTE_DEMO_TOKEN_BUDGET", "200000"))
+REMOTE_DEMO_SIM_ROUNDS = int(os.getenv("REMOTE_DEMO_SIM_ROUNDS", "1"))
+
 # ─── Trading Parameters ───────────────────────────────────────────────────────
 MIN_EV = float(os.getenv("MIN_EV", "0.10"))
 MAX_SPREAD = float(os.getenv("MAX_SPREAD", "0.03"))
