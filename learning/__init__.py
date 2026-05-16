@@ -5,6 +5,8 @@ __all__ = [
     "SelfReflectionEngine",
     "ProbabilityCalibrator",
     "MarketPatternLearner",
+    "RiskRegimeStore",
+    "RiskRegime",
 ]
 
 
@@ -25,4 +27,7 @@ def __getattr__(name):
     if name == "MarketPatternLearner":
         from .market_learner import MarketPatternLearner
         return MarketPatternLearner
+    if name in {"RiskRegimeStore", "RiskRegime"}:
+        from .risk_regime import RiskRegimeStore, RiskRegime
+        return {"RiskRegimeStore": RiskRegimeStore, "RiskRegime": RiskRegime}[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

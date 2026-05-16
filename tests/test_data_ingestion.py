@@ -1,5 +1,7 @@
 import unittest
 import datetime as dt
+import tempfile
+from pathlib import Path
 
 from data_ingestion.collectors import (
     DataCollector,
@@ -7,6 +9,9 @@ from data_ingestion.collectors import (
     rows_from_binance_klines,
     rows_from_openmeteo_daily,
 )
+from data_ingestion.features import build_btc_risk_regimes, build_weather_monthly_normals
+from data_ingestion.storage import write_jsonl
+from learning.risk_regime import RiskRegimeStore
 
 
 class DataIngestionParsingTests(unittest.TestCase):
@@ -103,6 +108,49 @@ class DataIngestionParsingTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertGreater(calls[1], calls[0])
         self.assertEqual(rows[1]["timestamp"], "2021-01-02T00:00:00+00:00")
+
+    def test_btc_regime_builder_labels_crash_and_throttles_risk(self) -> None:
+        candles = []
+        for i in range(35):
+            close = 100.0 + i
+            if i == 34:
+                close = 80.0
+            candles.append({
+                "symbol": "BTCUSDT",
+                "open_time": (dt.date(2021, 1, 1) + dt.timedelta(days=i)).isoformat(),
+                "close": close,
+            })
+
+        rows = build_btc_risk_regimes(candles)
+
+        self.assertEqual(rows[-1]["regime"], "crash")
+        self.assertLess(rows[-1]["risk_multiplier"], 1.0)
+
+    def test_weather_normals_group_by_city_month(self) -> None:
+        rows = build_weather_monthly_normals([
+            {"city": "Dallas", "date": "2021-01-01", "temperature_2m_max_c": 10, "temperature_2m_min_c": 1},
+            {"city": "Dallas", "date": "2021-01-02", "temperature_2m_max_c": 12, "temperature_2m_min_c": 3},
+            {"city": "Dallas", "date": "2021-02-01", "temperature_2m_max_c": 20, "temperature_2m_min_c": 8},
+        ])
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["city"], "Dallas")
+        self.assertEqual(rows[0]["month"], 1)
+        self.assertAlmostEqual(rows[0]["avg_temperature_2m_max_c"], 11.0)
+
+    def test_risk_regime_store_reads_latest_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "regimes.jsonl"
+            write_jsonl(path, [
+                {"date": "2021-01-01", "regime": "neutral", "risk_multiplier": 1.0},
+                {"date": "2021-01-02", "regime": "crash", "risk_multiplier": 0.25},
+            ])
+
+            latest = RiskRegimeStore(path).latest()
+
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.regime, "crash")
+        self.assertEqual(latest.risk_multiplier, 0.25)
 
 
 if __name__ == "__main__":

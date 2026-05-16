@@ -51,6 +51,8 @@ from config import (
     DEMO_SYNTHETIC_MARKETS,
     REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION,
     MARK_TO_MARKET_OPEN_POSITIONS,
+    USE_RISK_REGIME_SIZING,
+    RISK_REGIME_FILE,
     POLYMARKET_API_KEY,
     POLYMARKET_PRIVATE_KEY,
     POLYMARKET_PROXY_ADDRESS,
@@ -71,6 +73,7 @@ from learning import (
     ExperienceMemory,
     ProbabilityCalibrator,
     MarketPatternLearner,
+    RiskRegimeStore,
 )
 
 if TYPE_CHECKING:
@@ -113,6 +116,7 @@ class MiroWeatherAgent:
         self.calibrator = ProbabilityCalibrator(self.memory)
         self.market_learner = MarketPatternLearner(self.memory)
         self.reflection: Optional[SelfReflectionEngine] = None
+        self.risk_regime = RiskRegimeStore(RISK_REGIME_FILE) if USE_RISK_REGIME_SIZING else None
 
         # Simulation + trading (learning-aware)
         self.simulator: Optional[WeatherSimulation] = None
@@ -564,6 +568,7 @@ class MiroWeatherAgent:
                 slippage=market.get("slippage", 0.0),
             )
             if signal and signal.is_actionable:
+                self._apply_risk_regime_sizing(signal)
                 city_signals.append(signal)
                 logger.info(
                     "Signal: %s %s %s EV=%.3f p=%.2f→%.2f $%.2f",
@@ -686,6 +691,32 @@ class MiroWeatherAgent:
         )
         time_penalty = math.log(max(1.0, signal.hours_to_resolution) + 2)
         return signal.ev * confidence_weight * liquidity_weight / time_penalty
+
+    def _apply_risk_regime_sizing(self, signal: TradeSignal) -> None:
+        """
+        Reduce position size when processed BTC regime data shows broad market
+        stress. The regime layer only throttles risk; it never increases size
+        above the EV/Kelly recommendation.
+        """
+        if self.risk_regime is None:
+            return
+        regime = self.risk_regime.latest()
+        if regime is None:
+            return
+        multiplier = max(0.20, min(1.0, regime.risk_multiplier))
+        if multiplier >= 0.999:
+            return
+        before = signal.recommended_usd
+        signal.recommended_usd = round(signal.recommended_usd * multiplier, 4)
+        signal.kelly_fraction = round(signal.kelly_fraction * multiplier, 6)
+        logger.info(
+            "Risk regime sizing: %s %s multiplier=%.2f size %.2f→%.2f",
+            regime.date,
+            regime.regime,
+            multiplier,
+            before,
+            signal.recommended_usd,
+        )
 
     def _select_portfolio_candidates(self, signals: list[TradeSignal]) -> list[TradeSignal]:
         grouped: dict[tuple[str, str], list[TradeSignal]] = {}

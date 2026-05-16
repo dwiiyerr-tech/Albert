@@ -163,7 +163,7 @@ class DataCollector:
     def __init__(
         self,
         session: requests.Session | None = None,
-        sleep_seconds: float = 0.15,
+        sleep_seconds: float = 0.3,
         get_json: Callable[[str, dict], object] | None = None,
     ) -> None:
         self._session = session or requests.Session()
@@ -175,14 +175,23 @@ class DataCollector:
         if self._get_json_override:
             return self._get_json_override(url, params or {})
         last_exc: Exception | None = None
-        for attempt in range(1, 4):
+        for attempt in range(1, 6):
             try:
                 resp = self._session.get(url, params=params or {}, timeout=timeout)
                 resp.raise_for_status()
                 return resp.json()
+            except requests.HTTPError as exc:
+                last_exc = exc
+                status = exc.response.status_code if exc.response is not None else 0
+                if attempt < 5 and status == 429:
+                    time.sleep(5 * attempt)
+                    continue
+                if attempt < 5 and 500 <= status < 600:
+                    time.sleep(attempt)
+                    continue
             except Exception as exc:
                 last_exc = exc
-                if attempt < 3:
+                if attempt < 5:
                     time.sleep(attempt)
         logger.warning("Data request failed: %s params=%s error=%s", url, params, last_exc)
         return None

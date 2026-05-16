@@ -41,6 +41,17 @@ def _date_defaults(args) -> tuple[dt.date, dt.date]:
     return start, end
 
 
+def _latest_30_day_window(start: dt.date, end: dt.date, source: str) -> tuple[dt.date, dt.date]:
+    cutoff = end - dt.timedelta(days=30)
+    if start < cutoff:
+        print(
+            f"NOTE: {source} is limited by Binance to the latest 30 days. "
+            f"Using {cutoff.isoformat()}..{end.isoformat()}."
+        )
+        start = cutoff
+    return start, end
+
+
 def _safe_name(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() else "_" for ch in value.strip().lower())
     return "_".join(part for part in cleaned.split("_") if part) or "query"
@@ -63,7 +74,7 @@ def list_sources() -> None:
 
 
 def run_collection(args) -> None:
-    collector = DataCollector()
+    collector = DataCollector(sleep_seconds=args.request_sleep)
     data_root = Path(args.output_dir).resolve() if args.output_dir else DEFAULT_DATA_ROOT
     start, end = _date_defaults(args)
     cities = _selected_cities(args.city)
@@ -110,14 +121,16 @@ def run_collection(args) -> None:
             return
 
         if source == "btc-open-interest":
-            rows = collector.collect_binance_open_interest(args.symbol, args.period, start, end)
-            out = data_root / "crypto" / f"{args.symbol}_{args.period}_open_interest_{start.isoformat()}_{end.isoformat()}.jsonl"
+            effective_start, effective_end = _latest_30_day_window(start, end, source)
+            rows = collector.collect_binance_open_interest(args.symbol, args.period, effective_start, effective_end)
+            out = data_root / "crypto" / f"{args.symbol}_{args.period}_open_interest_{effective_start.isoformat()}_{effective_end.isoformat()}.jsonl"
             _write(out, rows, append, args.dry_run)
             return
 
         if source == "btc-long-short":
-            rows = collector.collect_binance_long_short(args.symbol, args.period, start, end)
-            out = data_root / "crypto" / f"{args.symbol}_{args.period}_long_short_{start.isoformat()}_{end.isoformat()}.jsonl"
+            effective_start, effective_end = _latest_30_day_window(start, end, source)
+            rows = collector.collect_binance_long_short(args.symbol, args.period, effective_start, effective_end)
+            out = data_root / "crypto" / f"{args.symbol}_{args.period}_long_short_{effective_start.isoformat()}_{effective_end.isoformat()}.jsonl"
             _write(out, rows, append, args.dry_run)
             return
 
@@ -172,6 +185,8 @@ def main() -> None:
     parser.add_argument("--symbol", default="BTCUSDT", help="Binance symbol. Default: BTCUSDT.")
     parser.add_argument("--interval", default="1d", help="Binance kline interval. Default: 1d.")
     parser.add_argument("--period", default="1d", help="Binance futures stats period. Default: 1d.")
+    parser.add_argument("--request-sleep", type=float, default=0.3,
+                        help="Seconds to sleep between paginated/provider requests. Default: 0.3.")
     args = parser.parse_args()
 
     if args.list_sources:

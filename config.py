@@ -170,6 +170,13 @@ REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION = (
 MARK_TO_MARKET_OPEN_POSITIONS = (
     os.getenv("MARK_TO_MARKET_OPEN_POSITIONS", "true").lower() != "false"
 )
+USE_RISK_REGIME_SIZING = (
+    os.getenv("USE_RISK_REGIME_SIZING", "true").lower() != "false"
+)
+RISK_REGIME_FILE = os.getenv(
+    "RISK_REGIME_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "processed", "btc_risk_regimes_1d.jsonl"),
+)
 
 # ─── Monitored Cities ────────────────────────────────────────────────────────
 CITIES = [

@@ -173,9 +173,18 @@ python ingest_data.py --source weather-actuals \
 
 # Collect public Polymarket temperature market metadata
 python ingest_data.py --source polymarket-markets --query temperature --limit 100
+
+# Build processed features Albert can consume
+python build_features.py --source all
 ```
 
 Generated data is stored under `data/raw/` as JSONL and is ignored by git. This keeps source code clean while still giving Albert replay-ready datasets for regime training and simulation.
+
+Processed features are written under `data/processed/`. When
+`USE_RISK_REGIME_SIZING=true`, Albert reads `btc_risk_regimes_1d.jsonl` and can
+throttle demo/live position size during BTC high-volatility, crash, or risk-off
+regimes. The regime layer only reduces size; it does not increase above the
+normal EV/Kelly recommendation.
 
 ---
 
@@ -187,6 +196,7 @@ Albert/
 ├── config.py                  # All parameters and city list
 ├── weather_data.py            # ECMWF / GFS / METAR data fetching
 ├── ingest_data.py             # Public data ingestion CLI for research/replay
+├── build_features.py          # Converts raw backfills into regime/normal features
 ├── data_manifest.json         # Source registry and target schemas
 ├── requirements.txt
 ├── data_ingestion/
