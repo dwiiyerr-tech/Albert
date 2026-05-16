@@ -101,8 +101,8 @@ class RemoteControlTests(unittest.TestCase):
         status = handler.handle("/status", chat_id=123)
         run = handler.handle("/dry_run_once", chat_id=123)
 
-        self.assertIn("Albert Status", status)
-        self.assertIn("Dry-run cycle selesai", run)
+        self.assertIn("ALBERT STATUS", status)
+        self.assertIn("DRY-RUN COMPLETE", run)
         self.assertEqual(agent.cycles_run, 1)
 
     def test_pnl_and_cycle_report_formatting(self):
@@ -112,9 +112,11 @@ class RemoteControlTests(unittest.TestCase):
         ok_cycle = format_cycle_report(agent, signals_count=2, duration_seconds=1.2)
         error_cycle = format_cycle_report(agent, signals_count=0, duration_seconds=0.5, error=RuntimeError("boom"))
 
-        self.assertIn("Albert P&L Report", pnl)
-        self.assertIn("Errors: 0", ok_cycle)
-        self.assertIn("Errors: 1", error_cycle)
+        self.assertIn("ALBERT P&L REPORT", pnl)
+        self.assertIn("Errors", ok_cycle)
+        self.assertIn(": 0", ok_cycle)
+        self.assertIn("Errors", error_cycle)
+        self.assertIn(": 1", error_cycle)
         self.assertIn("RuntimeError", error_cycle)
 
     def test_notification_settings_and_send_targets(self):
@@ -136,7 +138,8 @@ class RemoteControlTests(unittest.TestCase):
         _handler, agent = self._handler()
         report = format_pnl_report(agent, interval_hours=24)
 
-        self.assertIn("Window: last 24h", report)
+        self.assertIn("Window", report)
+        self.assertIn("last 24h", report)
         self.assertIn("Net P&L", report)
 
 

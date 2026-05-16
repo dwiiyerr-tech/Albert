@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import html
 import io
 import json
 import logging
@@ -63,6 +64,31 @@ def _trim_message(text: str, limit: int = 3900) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 80].rstrip() + "\n\n[truncated: message too long]"
+
+
+def _as_telegram_pre(text: str) -> str:
+    return f"<pre>{html.escape(_trim_message(text, 3500))}</pre>"
+
+
+def _signed_money(value: float) -> str:
+    sign = "+" if value >= 0 else "-"
+    return f"{sign}${abs(value):.2f}"
+
+
+def _money(value: float) -> str:
+    return f"${value:.2f}"
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
+def _table(title: str, rows: list[tuple[str, object]]) -> list[str]:
+    width = max([len(label) for label, _value in rows] + [1])
+    lines = [title, "-" * len(title)]
+    for label, value in rows:
+        lines.append(f"{label:<{width}} : {value}")
+    return lines
 
 
 @dataclass
@@ -157,46 +183,44 @@ def format_pnl_report(agent, *, interval_hours: float = 24.0, now: datetime.date
     opened_period = positions.opened_count_since(since)
     win_rate = summary["win_rate"]
     win_rate_text = "N/A" if win_rate is None else f"{win_rate:.1%}"
-    return (
-        "Albert P&L Report\n"
-        f"Window: last {interval_hours:g}h\n"
-        f"Opened: {opened_period} | Closed: {closed_period}\n"
-        f"Realized P&L: ${realized_period:+.2f}\n"
-        f"Closed P&L total: ${summary['total_pnl_usd']:+.2f}\n"
-        f"Unrealized P&L: ${summary['unrealized_pnl_usd']:+.2f}\n"
-        f"Net P&L: ${risk['net_pnl_usd']:+.2f}\n"
-        f"Open deployed: ${summary['open_deployed_usd']:.2f}\n"
-        f"Open planned risk: ${summary['open_planned_risk_usd']:.2f}\n"
-        f"Daily loss: ${risk['daily_loss_usd']:.2f}\n"
-        f"Drawdown: ${risk['drawdown_usd']:.2f}\n"
-        f"Win rate: {win_rate_text}"
-    )
+    return "\n".join(_table("ALBERT P&L REPORT", [
+        ("Window", f"last {interval_hours:g}h"),
+        ("Opened", opened_period),
+        ("Closed", closed_period),
+        ("Realized P&L", _signed_money(realized_period)),
+        ("Closed P&L total", _signed_money(summary["total_pnl_usd"])),
+        ("Unrealized P&L", _signed_money(summary["unrealized_pnl_usd"])),
+        ("Net P&L", _signed_money(risk["net_pnl_usd"])),
+        ("Open deployed", _money(summary["open_deployed_usd"])),
+        ("Open planned risk", _money(summary["open_planned_risk_usd"])),
+        ("Daily loss", _money(risk["daily_loss_usd"])),
+        ("Drawdown", _money(risk["drawdown_usd"])),
+        ("Win rate", win_rate_text),
+    ]))
 
 
 def format_cycle_report(agent, *, signals_count: int, duration_seconds: float, error: Exception | None = None) -> str:
     summary = agent.positions.summary()
     risk = agent.positions.risk_snapshot()
     if error is None:
-        return (
-            "Albert Cycle Report\n"
-            "Status: OK\n"
-            "Errors: 0\n"
-            f"Duration: {duration_seconds:.1f}s\n"
-            f"Signals: {signals_count}\n"
-            f"Open positions: {summary['open_positions']}\n"
-            f"Deployed: ${summary['open_deployed_usd']:.2f}\n"
-            f"Unrealized P&L: ${summary['unrealized_pnl_usd']:+.2f}\n"
-            f"Net P&L: ${risk['net_pnl_usd']:+.2f}\n"
-            f"Daily loss: ${risk['daily_loss_usd']:.2f}"
-        )
-    return (
-        "Albert Cycle Report\n"
-        "Status: ERROR\n"
-        "Errors: 1\n"
-        f"Duration: {duration_seconds:.1f}s\n"
-        f"Error type: {type(error).__name__}\n"
-        f"Message: {str(error)[:500]}"
-    )
+        return "\n".join(_table("ALBERT CYCLE REPORT", [
+            ("Status", "OK"),
+            ("Errors", 0),
+            ("Duration", f"{duration_seconds:.1f}s"),
+            ("Signals", signals_count),
+            ("Open positions", summary["open_positions"]),
+            ("Deployed", _money(summary["open_deployed_usd"])),
+            ("Unrealized P&L", _signed_money(summary["unrealized_pnl_usd"])),
+            ("Net P&L", _signed_money(risk["net_pnl_usd"])),
+            ("Daily loss", _money(risk["daily_loss_usd"])),
+        ]))
+    return "\n".join(_table("ALBERT CYCLE REPORT", [
+        ("Status", "ERROR"),
+        ("Errors", 1),
+        ("Duration", f"{duration_seconds:.1f}s"),
+        ("Error type", type(error).__name__),
+        ("Message", str(error)[:500]),
+    ]))
 
 
 class RemoteControlCommandHandler:
@@ -254,30 +278,36 @@ class RemoteControlCommandHandler:
 
     def _public_response(self, command: str, chat_id: int | str) -> str:
         if command == "whoami":
-            return f"Chat ID: {chat_id}"
+            return "\n".join(_table("ALBERT WHOAMI", [("Chat ID", chat_id)]))
         return self.help_text(chat_id)
 
     def help_text(self, chat_id: int | str | None = None) -> str:
         allowed = sorted(self.policy.allowed_commands)
-        auth_note = ""
+        lines = [
+            "ALBERT TELEGRAM CONTROL",
+            "-----------------------",
+            "Available safe commands:",
+            "",
+            "/status       portfolio and runtime status",
+            "/positions    open/closed position summary",
+            "/signals      latest cycle signals",
+            "/learning     learning and persona stats",
+            "/pnl          profit/loss report now",
+            "/dry_run_once run one dry-run cycle",
+            "/demo_once    run one virtual demo cycle",
+            "/pause        pause remote daemon loop",
+            "/resume       resume remote daemon loop",
+            "/whoami       show this Telegram chat ID",
+            "",
+            f"Allowlist: {', '.join(allowed) if allowed else '(empty)'}",
+        ]
         if chat_id is not None and not self.policy.is_chat_allowed(chat_id):
-            auth_note = "\n\nChat ini belum authorized. Jalankan /whoami lalu masukkan ID ke setup wizard."
-        return (
-            "Albert Telegram Control\n"
-            "Command aman:\n"
-            "/status - ringkasan mode, cycle, risk, posisi\n"
-            "/positions - daftar posisi terbuka\n"
-            "/signals - sinyal terakhir\n"
-            "/learning - statistik learning/persona\n"
-            "/pnl - laporan profit/loss sekarang\n"
-            "/dry_run_once - jalankan 1 dry-run cycle\n"
-            "/demo_once - jalankan 1 demo cycle virtual\n"
-            "/pause - pause daemon remote\n"
-            "/resume - lanjutkan daemon remote\n"
-            "/whoami - tampilkan chat ID\n\n"
-            f"Allowlist aktif: {', '.join(allowed) if allowed else '(kosong)'}"
-            f"{auth_note}"
-        )
+            lines += [
+                "",
+                "This chat is not authorized yet.",
+                "Run /whoami and add the ID to REMOTE_ALLOWED_CHAT_IDS.",
+            ]
+        return "\n".join(lines)
 
     def _execute(self, command: str) -> str:
         if command == "status":
@@ -307,81 +337,89 @@ class RemoteControlCommandHandler:
         mode = "demo" if getattr(self.agent, "_demo", None) else ("dry" if self.agent.dry_run else "live")
         summary = self.agent.positions.summary()
         risk = self.agent.positions.risk_snapshot()
-        return (
-            "Albert Status\n"
-            f"Mode: {mode}\n"
-            f"Paused: {self.paused}\n"
-            f"Cycle: {state.get('cycle_num', 0)}\n"
-            f"Current city: {state.get('current_city', '-')}\n"
-            f"Last signals: {len(state.get('last_signals', []) or [])}\n"
-            f"Open positions: {summary['open_positions']}\n"
-            f"Open deployed: ${summary['open_deployed_usd']:.2f}\n"
-            f"Unrealized PnL: ${summary['unrealized_pnl_usd']:.2f}\n"
-            f"Total PnL: ${summary['total_pnl_usd']:.2f}\n"
-            f"Daily loss: ${risk['daily_loss_usd']:.2f}\n"
-            f"Drawdown: ${risk['drawdown_usd']:.2f}"
-        )
+        runtime = _table("ALBERT STATUS", [
+            ("Mode", mode),
+            ("Paused", _yes_no(self.paused)),
+            ("Cycle", state.get("cycle_num", 0)),
+            ("Current city", state.get("current_city", "-")),
+            ("Last signals", len(state.get("last_signals", []) or [])),
+        ])
+        portfolio = _table("PORTFOLIO", [
+            ("Open positions", summary["open_positions"]),
+            ("Open deployed", _money(summary["open_deployed_usd"])),
+            ("Unrealized P&L", _signed_money(summary["unrealized_pnl_usd"])),
+            ("Closed P&L", _signed_money(summary["total_pnl_usd"])),
+            ("Net P&L", _signed_money(risk["net_pnl_usd"])),
+            ("Daily loss", _money(risk["daily_loss_usd"])),
+            ("Drawdown", _money(risk["drawdown_usd"])),
+        ])
+        return "\n".join(runtime + [""] + portfolio)
 
     def _positions_text(self) -> str:
         summary = self.agent.positions.summary()
-        lines = [
-            "Albert Positions",
-            f"Open: {summary['open_positions']} | Closed: {summary['closed_positions']}",
-            f"Deployed: ${summary['open_deployed_usd']:.2f}",
-            f"Unrealized PnL: ${summary['unrealized_pnl_usd']:.2f}",
-            f"Total PnL: ${summary['total_pnl_usd']:.2f}",
-        ]
+        lines = _table("ALBERT POSITIONS", [
+            ("Open", summary["open_positions"]),
+            ("Closed", summary["closed_positions"]),
+            ("Deployed", _money(summary["open_deployed_usd"])),
+            ("Unrealized P&L", _signed_money(summary["unrealized_pnl_usd"])),
+            ("Closed P&L", _signed_money(summary["total_pnl_usd"])),
+        ])
         open_positions = list(self.agent.positions.open_positions.values())
         if not open_positions:
-            lines.append("Tidak ada posisi terbuka.")
+            lines += ["", "No open positions."]
             return "\n".join(lines)
-        lines.append("")
-        for pos in open_positions[:12]:
-            lines.append(
-                f"{pos.city} {pos.direction} {pos.target_date} "
-                f"{_format_bucket(pos.bucket_low, pos.bucket_high)} "
-                f"entry={pos.entry_price:.3f} cur={pos.current_price:.3f} "
-                f"size=${pos.size_usd:.2f} PnL={pos.unrealized_pnl_pct:+.1%}"
-            )
+        lines += ["", "OPEN POSITIONS", "--------------"]
+        for idx, pos in enumerate(open_positions[:12], start=1):
+            lines += [
+                f"{idx}. {pos.city} {pos.direction} {pos.target_date}",
+                f"   Bucket  : {_format_bucket(pos.bucket_low, pos.bucket_high)}",
+                f"   Entry   : {pos.entry_price:.3f}",
+                f"   Current : {pos.current_price:.3f}",
+                f"   Size    : {_money(pos.size_usd)}",
+                f"   PnL     : {pos.unrealized_pnl_pct:+.1%}",
+                "",
+            ]
         if len(open_positions) > 12:
-            lines.append(f"... {len(open_positions) - 12} posisi lain")
+            lines.append(f"... {len(open_positions) - 12} more positions")
         return "\n".join(lines)
 
     def _signals_text(self) -> str:
         signals = list(getattr(self.agent, "_cycle_state", {}).get("last_signals", []) or [])
         if not signals:
-            return "Belum ada sinyal dari cycle terakhir."
-        lines = ["Albert Last Signals"]
-        for sig in signals[:12]:
+            return "ALBERT LAST SIGNALS\n-------------------\nNo signals from the latest cycle yet."
+        lines = ["ALBERT LAST SIGNALS", "-------------------"]
+        for idx, sig in enumerate(signals[:12], start=1):
             probability = getattr(sig, "model_probability", getattr(sig, "probability", 0.0))
-            lines.append(
-                f"{sig.city} {sig.direction} {sig.target_date} "
-                f"{_format_bucket(sig.bucket_low, sig.bucket_high)} "
-                f"EV={sig.ev:+.3f} p={probability:.2f} "
-                f"price={sig.market_price:.3f} size=${sig.recommended_usd:.2f}"
-            )
+            lines += [
+                f"{idx}. {sig.city} {sig.direction} {sig.target_date}",
+                f"   Bucket : {_format_bucket(sig.bucket_low, sig.bucket_high)}",
+                f"   EV     : {sig.ev:+.3f}",
+                f"   Prob   : {probability:.2f}",
+                f"   Price  : {sig.market_price:.3f}",
+                f"   Size   : {_money(sig.recommended_usd)}",
+                "",
+            ]
         if len(signals) > 12:
-            lines.append(f"... {len(signals) - 12} sinyal lain")
+            lines.append(f"... {len(signals) - 12} more signals")
         return "\n".join(lines)
 
     def _learning_text(self) -> str:
         stats = self.agent.memory.overall_stats()
-        lines = [
-            "Albert Learning",
-            f"Predictions: {stats.get('total_predictions', 0)}",
-            f"Resolved avg Brier: {stats.get('avg_brier_score', 'N/A')}",
-            f"Trades: {stats.get('total_trades', 0)}",
-            f"Win rate: {stats.get('win_rate', 'N/A')}",
-            f"Total PnL: ${stats.get('total_pnl_usd', 0):.2f}",
-            f"Lessons: {stats.get('total_lessons', 0)}",
-        ]
+        total_pnl = float(stats.get("total_pnl_usd", 0) or 0)
+        lines = _table("ALBERT LEARNING", [
+            ("Predictions", stats.get("total_predictions", 0)),
+            ("Avg Brier", stats.get("avg_brier_score", "N/A")),
+            ("Trades", stats.get("total_trades", 0)),
+            ("Win rate", stats.get("win_rate", "N/A")),
+            ("Closed P&L", _signed_money(total_pnl)),
+            ("Lessons", stats.get("total_lessons", 0)),
+        ])
         scores = self.agent.memory.persona_score_report()
         if scores:
-            lines.append("")
-            lines.append("Persona top weights:")
+            lines += ["", "PERSONA WEIGHTS", "---------------"]
             for row in scores[:5]:
                 lines.append(
-                    f"{row['name']}: n={row['predictions']} "
+                    f"{row['name']:<24} n={row['predictions']:<4} "
                     f"brier={row['avg_brier']} weight={row['weight']}"
                 )
         return "\n".join(lines)
@@ -401,9 +439,11 @@ class RemoteControlCommandHandler:
         finally:
             self._run_lock.release()
         return (
-            "Dry-run cycle selesai\n"
-            f"Durasi: {time.monotonic() - start:.1f}s\n"
-            f"Signals: {len(signals)}\n\n"
+            "\n".join(_table("DRY-RUN COMPLETE", [
+                ("Duration", f"{time.monotonic() - start:.1f}s"),
+                ("Signals", len(signals)),
+            ]))
+            + "\n\n"
             f"{self._status_text()}"
         )
 
@@ -420,7 +460,13 @@ class RemoteControlCommandHandler:
                 result = self.demo_runner()
         finally:
             self._run_lock.release()
-        return f"Demo cycle selesai\nDurasi: {time.monotonic() - start:.1f}s\n{result}"
+        return (
+            "\n".join(_table("DEMO COMPLETE", [
+                ("Duration", f"{time.monotonic() - start:.1f}s"),
+            ]))
+            + "\n\n"
+            + result
+        )
 
     def _audit(self, chat_id: int | str, username: str, command: str, allowed: bool, outcome: str) -> None:
         if not self.policy.audit_log:
@@ -532,7 +578,8 @@ class TelegramRemoteControlBot:
                 self._url("sendMessage"),
                 json={
                     "chat_id": chat_id,
-                    "text": _trim_message(text),
+                    "text": _as_telegram_pre(text),
+                    "parse_mode": "HTML",
                     "disable_web_page_preview": True,
                 },
                 timeout=15,
