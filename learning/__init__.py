@@ -7,6 +7,8 @@ __all__ = [
     "MarketPatternLearner",
     "RiskRegimeStore",
     "RiskRegime",
+    "MarketFeatureStore",
+    "MarketFeatures",
     "WeatherNormalStore",
     "WeatherNormal",
 ]
@@ -32,6 +34,9 @@ def __getattr__(name):
     if name in {"RiskRegimeStore", "RiskRegime"}:
         from .risk_regime import RiskRegimeStore, RiskRegime
         return {"RiskRegimeStore": RiskRegimeStore, "RiskRegime": RiskRegime}[name]
+    if name in {"MarketFeatureStore", "MarketFeatures"}:
+        from .feature_store import MarketFeatureStore, MarketFeatures
+        return {"MarketFeatureStore": MarketFeatureStore, "MarketFeatures": MarketFeatures}[name]
     if name in {"WeatherNormalStore", "WeatherNormal"}:
         from .weather_normals import WeatherNormalStore, WeatherNormal
         return {"WeatherNormalStore": WeatherNormalStore, "WeatherNormal": WeatherNormal}[name]

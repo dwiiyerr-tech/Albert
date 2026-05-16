@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from config import (
@@ -56,9 +56,13 @@ class TradeSignal:
     volume: float
     market_id: str = ""
     no_token_id: str = ""   # CLOB NO token ID (needed for live NO-direction orders)
+    condition_id: str = ""
     probability_edge: float = 0.0
     orderbook_depth_usd: float = 0.0
     slippage: float = 0.0
+    decision_action: str = ""
+    decision_reasons: list[str] = field(default_factory=list)
+    data_quality_score: float = 0.0
 
     @property
     def is_actionable(self) -> bool:
@@ -171,6 +175,7 @@ class EVCalculator:
         volume: float,
         spread: float,
         no_token_id: str = "",
+        condition_id: str = "",
         market_price_no: float | None = None,
         orderbook_depth_usd: float = 0.0,
         slippage: float = 0.0,
@@ -250,6 +255,7 @@ class EVCalculator:
             volume=volume,
             market_id=market_id,
             no_token_id=no_token_id,
+            condition_id=condition_id,
             probability_edge=edge,
             orderbook_depth_usd=orderbook_depth_usd,
             slippage=slippage,

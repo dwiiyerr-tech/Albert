@@ -249,6 +249,7 @@ class MarketScanner:
         return {
             "market_id": clob_token_id,    # CLOB YES token ID for OrderArgs
             "no_token_id": no_token_id,     # CLOB NO token ID
+            "condition_id": str(market.get("conditionId") or market.get("condition_id") or ""),
             "question": question,
             "price_yes": price_yes,
             "price_no": price_no,

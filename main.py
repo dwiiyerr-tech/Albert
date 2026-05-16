@@ -81,6 +81,7 @@ from utils import setup_logging
 from weather_data import fetch_city_forecast, CityForecast, get_historical_temp
 from simulation.knowledge_graph import WeatherKnowledgeGraph
 from trading import (
+    DecisionEngine,
     EVCalculator,
     MarketScanner,
     PositionManager,
@@ -90,6 +91,7 @@ from trading import (
 )
 from learning import (
     ExperienceMemory,
+    MarketFeatureStore,
     ProbabilityCalibrator,
     MarketPatternLearner,
     RiskRegimeStore,
@@ -141,6 +143,8 @@ class MiroWeatherAgent:
         self.memory = ExperienceMemory()
         self.calibrator = ProbabilityCalibrator(self.memory)
         self.market_learner = MarketPatternLearner(self.memory)
+        self.feature_store = MarketFeatureStore()
+        self.decision_engine = DecisionEngine()
         self.reflection: Optional[SelfReflectionEngine] = None
         self.risk_regime = RiskRegimeStore(RISK_REGIME_FILE) if USE_RISK_REGIME_SIZING else None
 
@@ -185,6 +189,7 @@ class MiroWeatherAgent:
             "last_markets": {},
             "last_forecast": {},
             "last_sim_result": {},   # city → scenario/confidence data from last sim
+            "last_decisions": [],
         }
 
     def _ensure_llm_stack(self) -> None:
@@ -603,6 +608,7 @@ class MiroWeatherAgent:
                 volume=market["volume"],
                 spread=market["spread"],
                 no_token_id=market.get("no_token_id", ""),
+                condition_id=market.get("condition_id", ""),
                 market_price_no=market.get("price_no"),
                 orderbook_depth_usd=market.get("orderbook_depth_usd", 0.0),
                 slippage=market.get("slippage", 0.0),
@@ -771,6 +777,70 @@ class MiroWeatherAgent:
         selected.sort(key=self._signal_score, reverse=True)
         return selected
 
+    def _apply_decision_gate(self, signals: list[TradeSignal]) -> list[TradeSignal]:
+        """
+        Enrich EV signals with feature-store data and apply the final decision gate.
+        Paper/demo trades can proceed with reduced size on incomplete data; live
+        trading requires stronger local feature coverage.
+        """
+        live_mode = bool(self.executor and self.executor.is_configured())
+        gated: list[TradeSignal] = []
+        decisions: list[dict] = []
+
+        for signal in signals:
+            features = self.feature_store.features_for_signal(signal)
+            decision = self.decision_engine.evaluate(signal, features, live_mode=live_mode)
+            signal.decision_action = decision.action
+            signal.decision_reasons = decision.reasons + decision.warnings
+            signal.data_quality_score = decision.data_quality_score
+
+            if 0 < decision.risk_multiplier < 1:
+                before = signal.recommended_usd
+                signal.recommended_usd = round(signal.recommended_usd * decision.risk_multiplier, 4)
+                signal.kelly_fraction = round(signal.kelly_fraction * decision.risk_multiplier, 6)
+                logger.info(
+                    "Decision sizing: %s %s multiplier=%.2f size %.2f→%.2f",
+                    signal.direction,
+                    signal.city,
+                    decision.risk_multiplier,
+                    before,
+                    signal.recommended_usd,
+                )
+
+            decisions.append({
+                "city": signal.city,
+                "target_date": signal.target_date,
+                "direction": signal.direction,
+                "market_id": signal.market_id,
+                **decision.compact(),
+            })
+
+            if signal.recommended_usd <= 0:
+                logger.info("Decision gate skipped %s %s: zero recommended size",
+                            signal.direction, signal.city)
+                continue
+            if decision.action in {"SKIP", "WATCH"}:
+                logger.info(
+                    "Decision gate %s %s %s: %s",
+                    decision.action,
+                    signal.direction,
+                    signal.city,
+                    "; ".join(decision.reasons + decision.warnings),
+                )
+                continue
+            if live_mode and not decision.live_ready:
+                logger.info(
+                    "LIVE gate blocked %s %s: %s",
+                    signal.direction,
+                    signal.city,
+                    "; ".join(decision.reasons + decision.warnings),
+                )
+                continue
+            gated.append(signal)
+
+        self._cycle_state["last_decisions"] = decisions
+        return gated
+
     def _city_date_position_state(self, city: str, target_date: str) -> tuple[int, float]:
         positions = [
             p for p in self.positions.open_positions.values()
@@ -856,6 +926,7 @@ class MiroWeatherAgent:
         self._cycle_state["last_markets"] = {}
         self._cycle_state["last_forecast"] = {}
         self._cycle_state["last_sim_result"] = {}
+        self._cycle_state["last_decisions"] = []
         self._cycle_state["current_city"] = "—"
 
         logger.info("═══ MiroWeather cycle: target=%s | lessons=%d | resolved=%d ═══",
@@ -914,6 +985,7 @@ class MiroWeatherAgent:
         # Score = EV / log(hours+2) so 1-hour markets outrank 72-hour ones
         # even at the same EV, favouring faster fills and tighter spreads.
         actionable = self._select_portfolio_candidates(actionable)
+        actionable = self._apply_decision_gate(actionable)
         self._cycle_state["last_signals"] = list(actionable)
         if actionable:
             logger.info(

@@ -204,6 +204,14 @@ RISK_REGIME_FILE = os.getenv(
     "RISK_REGIME_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "processed", "btc_risk_regimes_1d.jsonl"),
 )
+DECISION_ENGINE_ENABLED = (
+    os.getenv("DECISION_ENGINE_ENABLED", "true").lower() != "false"
+)
+DECISION_MIN_LIVE_FEATURE_QUALITY = float(os.getenv("DECISION_MIN_LIVE_FEATURE_QUALITY", "0.60"))
+DECISION_LOW_DATA_RISK_MULTIPLIER = float(os.getenv("DECISION_LOW_DATA_RISK_MULTIPLIER", "0.50"))
+DECISION_MAX_HOLDER_CONCENTRATION = float(os.getenv("DECISION_MAX_HOLDER_CONCENTRATION", "0.65"))
+DECISION_CONTRA_FLOW_THRESHOLD = float(os.getenv("DECISION_CONTRA_FLOW_THRESHOLD", "0.35"))
+DECISION_MAX_VOLATILITY_24H = float(os.getenv("DECISION_MAX_VOLATILITY_24H", "0.20"))
 USE_WEATHER_NORMALS = (
     os.getenv("USE_WEATHER_NORMALS", "true").lower() != "false"
 )
