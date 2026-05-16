@@ -103,6 +103,7 @@ All parameters are in `config.py`:
 | `MAX_AGENTS_PER_SIM` | 4 | Number of analyst personas |
 | `CONSENSUS_THRESHOLD` | 0.65 | High-confidence signal threshold |
 | `STOP_LOSS_PCT` | 0.20 | Stop-loss at 20% below entry |
+| `REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION` | true | For real Polymarket markets, wait for official Gamma/CLOB resolution before settling positions |
 
 ---
 
@@ -136,7 +137,7 @@ export LLM_ENSEMBLE="anthropic:claude-sonnet-4-6,openai-compatible:gpt-4.1:https
 - **Open-Meteo** — ECMWF IFS 0.25° and GFS seamless forecasts (free)
 - **Aviation Weather (NOAA)** — Live METAR temperature observations (free)
 - **Visual Crossing** — Historical temperature validation (free tier)
-- **Polymarket** — Prediction market prices and order book data
+- **Polymarket** — Prediction market prices, order book data, and official market resolution via public Gamma/CLOB endpoints
 
 ---
 

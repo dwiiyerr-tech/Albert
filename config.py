@@ -153,6 +153,12 @@ SELF_PLAY_REFLECTION = os.getenv("SELF_PLAY_REFLECTION", "true").lower() != "fal
 DEMO_SYNTHETIC_MARKETS = os.getenv("DEMO_SYNTHETIC_MARKETS", "true").lower() != "false"
 MARKET_SCANNER_DEBUG = os.getenv("MARKET_SCANNER_DEBUG", "false").lower() == "true"
 MAX_DEBATE_TRANSCRIPTS = int(os.getenv("MAX_DEBATE_TRANSCRIPTS", "200"))
+# For real Polymarket markets, wait for official Gamma/CLOB resolution before
+# settling paper/live positions. Synthetic demo markets still use weather
+# archive fallback because they do not exist on Polymarket.
+REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION = (
+    os.getenv("REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION", "true").lower() != "false"
+)
 
 # ─── Monitored Cities ────────────────────────────────────────────────────────
 CITIES = [

@@ -40,6 +40,7 @@ from config import (
     SAVE_DEBATE_TRANSCRIPTS,
     SELF_PLAY_REFLECTION,
     DEMO_SYNTHETIC_MARKETS,
+    REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION,
     POLYMARKET_API_KEY,
     POLYMARKET_PRIVATE_KEY,
     POLYMARKET_PROXY_ADDRESS,
@@ -48,7 +49,14 @@ from config import (
 from utils import setup_logging
 from weather_data import fetch_city_forecast, CityForecast, get_historical_temp
 from simulation.knowledge_graph import WeatherKnowledgeGraph
-from trading import EVCalculator, MarketScanner, PositionManager, TradeSignal, PolymarketOrderExecutor
+from trading import (
+    EVCalculator,
+    MarketScanner,
+    PositionManager,
+    TradeSignal,
+    PolymarketOrderExecutor,
+    PolymarketResolutionClient,
+)
 from learning import (
     ExperienceMemory,
     ProbabilityCalibrator,
@@ -86,6 +94,7 @@ class MiroWeatherAgent:
         self.knowledge_graph = WeatherKnowledgeGraph()
         self.reporter: Optional[ReportGenerator] = None
         self.scanner = MarketScanner()
+        self.resolver = PolymarketResolutionClient()
         positions_file = "positions_demo.json" if demo_session else "positions.json"
         self.positions = PositionManager(positions_file=positions_file)
 
@@ -151,6 +160,25 @@ class MiroWeatherAgent:
         if self.reporter is None:
             self.reporter = ReportGenerator()
 
+    def _is_public_polymarket_market(self, market_id: str) -> bool:
+        return bool(market_id) and not str(market_id).startswith("demo:")
+
+    def _historical_temp_for_record(
+        self,
+        rec,
+        target: datetime.date,
+    ):
+        city_cfg = _CITY_BY_NAME.get(rec.city, {})
+        lat = city_cfg.get("lat")
+        lon = city_cfg.get("lon")
+        return get_historical_temp(rec.city, target, lat=lat, lon=lon)
+
+    def _bucket_outcome(self, temp_f: float, bucket_low: float, bucket_high: float) -> bool:
+        return (
+            (bucket_low == float("-inf") or temp_f >= bucket_low)
+            and (bucket_high == float("inf") or temp_f < bucket_high)
+        )
+
     # ─── Learning pipeline ────────────────────────────────────────────────────
 
     def _resolve_pending_predictions(self) -> tuple[int, set[str]]:
@@ -182,30 +210,45 @@ class MiroWeatherAgent:
                 target = datetime.date.fromisoformat(rec.target_date)
             except ValueError:
                 continue
-            if target >= today:
-                continue  # not yet passed
+            target_passed = target < today
+            is_public_market = self._is_public_polymarket_market(rec.market_id)
+            resolved_from_official = False
+            temp_f = None
+            outcome_yes = None
+            yes_payout = None
+            no_payout = None
+            resolution_source = "weather_archive"
 
-            # Look up lat/lon for the city (needed for Open-Meteo archive fallback)
-            city_cfg = _CITY_BY_NAME.get(rec.city, {})
-            lat = city_cfg.get("lat")
-            lon = city_cfg.get("lon")
+            if is_public_market:
+                official = self.resolver.resolve_token(rec.market_id)
+                if official:
+                    resolved_from_official = True
+                    outcome_yes = official.outcome_yes
+                    yes_payout = official.yes_payout
+                    no_payout = official.no_payout
+                    resolution_source = official.source
+                    logger.info(
+                        "Official Polymarket resolution: %s %s yes=%.2f no=%.2f",
+                        rec.city, rec.target_date, yes_payout, no_payout,
+                    )
+                elif REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION:
+                    continue
 
-            try:
-                actual = get_historical_temp(rec.city, target, lat=lat, lon=lon)
-            except Exception as exc:
-                logger.warning("Historical temp lookup failed for %s %s: %s",
-                               rec.city, target, exc)
-                continue
-            if actual is None:
-                continue
-
-            bucket_low = rec.bucket_low
-            bucket_high = rec.bucket_high
-            temp_f = actual.temp_f
-            outcome_yes = (
-                (bucket_low == float("-inf") or temp_f >= bucket_low)
-                and (bucket_high == float("inf") or temp_f < bucket_high)
-            )
+            if not resolved_from_official:
+                if not target_passed:
+                    continue  # not yet passed
+                try:
+                    actual = self._historical_temp_for_record(rec, target)
+                except Exception as exc:
+                    logger.warning("Historical temp lookup failed for %s %s: %s",
+                                   rec.city, target, exc)
+                    continue
+                if actual is None:
+                    continue
+                temp_f = actual.temp_f
+                outcome_yes = self._bucket_outcome(temp_f, rec.bucket_low, rec.bucket_high)
+                yes_payout = 1.0 if outcome_yes else 0.0
+                no_payout = 0.0 if outcome_yes else 1.0
 
             # Resolve any related open position
             pnl = None
@@ -217,16 +260,39 @@ class MiroWeatherAgent:
                     # Cancel the CLOB order if it hasn't fully filled yet (live mode only)
                     if self.executor and self.executor.is_configured() and open_pos.order_id:
                         self.executor.cancel_order(open_pos.order_id)
-                    pos = self.positions.resolve_position(rec.market_id, outcome_yes, reason="resolved")
+                    if resolved_from_official:
+                        pos = self.positions.resolve_position_payout(
+                            rec.market_id,
+                            yes_payout=yes_payout or 0.0,
+                            no_payout=no_payout or 0.0,
+                            reason="resolved",
+                        )
+                    else:
+                        pos = self.positions.resolve_position(
+                            rec.market_id,
+                            bool(outcome_yes),
+                            reason="resolved",
+                        )
                     if pos:
                         pnl = pos.pnl_usd
 
-            self.memory.resolve_prediction(rec.id, temp_f, outcome_yes, pnl_usd=pnl)
-
-            # ── FIX: Update MarketObservations so MarketPatternLearner works ──
-            obs_updated = self.memory.resolve_observations_for_city(
-                rec.city, rec.target_date, temp_f, outcome_yes
+            self.memory.resolve_prediction(
+                rec.id,
+                temp_f,
+                outcome_yes,
+                pnl_usd=pnl,
+                resolution_source=resolution_source,
             )
+
+            if resolved_from_official:
+                obs_updated = self.memory.resolve_observation_for_market(
+                    rec.market_id, rec.target_date, temp_f, outcome_yes
+                )
+            else:
+                # ── FIX: Update MarketObservations so MarketPatternLearner works ──
+                obs_updated = self.memory.resolve_observations_for_city(
+                    rec.city, rec.target_date, temp_f, bool(outcome_yes)
+                )
             if obs_updated:
                 logger.debug("Updated %d observations for %s %s",
                              obs_updated, rec.city, rec.target_date)
@@ -234,18 +300,19 @@ class MiroWeatherAgent:
             # ── FIX: Close the lesson feedback loop ───────────────────────────
             # Determine if the prediction was directionally correct
             # (predicted prob > 0.5 and outcome_yes, or < 0.5 and not outcome_yes)
-            was_correct = (rec.consensus_probability > 0.5) == outcome_yes
-            # Validate/violate lessons that are relevant to this city
-            relevant_lessons = self.memory.lessons_for_city(rec.city, top_n=20)
-            for lesson in relevant_lessons:
-                # Only update lessons that predate this prediction (were active when it was made)
-                if lesson.created_ts <= rec.created_ts:
-                    self.memory.validate_lesson(lesson.id, confirmed=was_correct)
+            if outcome_yes is not None:
+                was_correct = (rec.consensus_probability > 0.5) == outcome_yes
+                # Validate/violate lessons that are relevant to this city
+                relevant_lessons = self.memory.lessons_for_city(rec.city, top_n=20)
+                for lesson in relevant_lessons:
+                    # Only update lessons that predate this prediction (were active when it was made)
+                    if lesson.created_ts <= rec.created_ts:
+                        self.memory.validate_lesson(lesson.id, confirmed=was_correct)
 
             # Immediate post-trade reflection (only when we've built up 3+ resolutions)
             rec_updated = self.memory.predictions[rec.id]
             city_resolved_count = len(self.memory.resolved_records(city=rec.city, last_n=200))
-            if city_resolved_count >= 3:
+            if outcome_yes is not None and city_resolved_count >= 3:
                 self._ensure_llm_stack()
                 assert self.reflection is not None
                 new_lessons = self.reflection.post_trade_reflection(rec_updated)
@@ -277,7 +344,10 @@ class MiroWeatherAgent:
             logger.info("Market pattern learner: %d new pattern lessons", len(new_patterns))
 
         # Batch reflection every 10+ resolutions
-        resolved_all = self.memory.resolved_records(last_n=100)
+        resolved_all = [
+            r for r in self.memory.resolved_records(last_n=100)
+            if r.outcome_yes is not None
+        ]
         if len(resolved_all) >= 10 and newly_resolved >= 3:
             self._ensure_llm_stack()
             assert self.reflection is not None
@@ -286,7 +356,10 @@ class MiroWeatherAgent:
 
         # City-level batch reflection for cities with fresh data
         for city in list(resolved_cities or set())[:5]:
-            city_records = self.memory.resolved_records(city=city, last_n=30)
+            city_records = [
+                r for r in self.memory.resolved_records(city=city, last_n=30)
+                if r.outcome_yes is not None
+            ]
             if len(city_records) >= 5:
                 self._ensure_llm_stack()
                 assert self.reflection is not None
@@ -449,6 +522,7 @@ class MiroWeatherAgent:
                 self.memory.record_observation(
                     city=city_name,
                     market_id=market["market_id"],
+                    target_date=target_str,
                     question=market.get("question", ""),
                     bucket_low=market["bucket_low"],
                     bucket_high=market["bucket_high"],

@@ -176,13 +176,23 @@ class PositionManager:
         outcome_yes is False. The position key remains the YES token/market id
         so opposite-side duplicate exposure is still blocked.
         """
+        yes_payout = 1.0 if outcome_yes else 0.0
+        no_payout = 0.0 if outcome_yes else 1.0
+        return self.resolve_position_payout(market_id, yes_payout, no_payout, reason)
+
+    def resolve_position_payout(
+        self,
+        market_id: str,
+        yes_payout: float,
+        no_payout: float,
+        reason: str = "resolved",
+    ) -> Optional[Position]:
+        """Close a position using explicit YES/NO settlement payouts."""
         pos = self.open_positions.get(market_id)
         if not pos:
             return None
-        pos.current_price = 1.0 if (
-            (pos.direction == "YES" and outcome_yes)
-            or (pos.direction == "NO" and not outcome_yes)
-        ) else 0.0
+        payout = yes_payout if pos.direction == "YES" else no_payout
+        pos.current_price = max(0.0, min(1.0, payout))
         return self._close(pos, reason)
 
     def _close(self, pos: Position, reason: str) -> Position:

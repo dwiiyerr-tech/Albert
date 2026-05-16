@@ -53,6 +53,7 @@ class PredictionRecord:
     outcome_yes: Optional[bool] = None        # did the YES resolve True?
     resolved: bool = False
     resolution_ts: Optional[str] = None
+    resolution_source: Optional[str] = None
     # Trade (if executed)
     trade_direction: Optional[str] = None     # YES / NO / None
     trade_size_usd: Optional[float] = None
@@ -105,6 +106,7 @@ class MarketObservation:
     volume: float
     hours_to_resolution: float
     observed_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    target_date: str = ""
     # What actually happened (filled after resolution)
     resolved_yes: Optional[bool] = None
     actual_temp_f: Optional[float] = None
@@ -369,7 +371,11 @@ class ExperienceMemory:
         """
         updated = 0
         for obs in self.observations:
-            if obs.city == city and obs.resolved_yes is None:
+            if (
+                obs.city == city
+                and obs.resolved_yes is None
+                and (not obs.target_date or obs.target_date == target_date)
+            ):
                 # Match by bucket: check if actual temp falls in the observation's bucket
                 lo, hi = obs.bucket_low, obs.bucket_high
                 obs_outcome = (
@@ -381,12 +387,38 @@ class ExperienceMemory:
                 updated += 1
         return updated
 
+    def resolve_observation_for_market(
+        self,
+        market_id: str,
+        target_date: str,
+        actual_temp_f: Optional[float],
+        outcome_yes: Optional[bool],
+    ) -> int:
+        """
+        Mark observations for a specific market as resolved from official market
+        data. Unknown/50-50 resolutions are left unscored.
+        """
+        if outcome_yes is None:
+            return 0
+        updated = 0
+        for obs in self.observations:
+            if (
+                obs.market_id == market_id
+                and obs.resolved_yes is None
+                and (not obs.target_date or obs.target_date == target_date)
+            ):
+                obs.resolved_yes = outcome_yes
+                obs.actual_temp_f = actual_temp_f
+                updated += 1
+        return updated
+
     def resolve_prediction(
         self,
         record_id: str,
-        actual_temp_f: float,
-        outcome_yes: bool,
+        actual_temp_f: Optional[float],
+        outcome_yes: Optional[bool],
         pnl_usd: Optional[float] = None,
+        resolution_source: Optional[str] = None,
     ) -> Optional[PredictionRecord]:
         rec = self.predictions.get(record_id)
         if not rec:
@@ -395,8 +427,11 @@ class ExperienceMemory:
         rec.outcome_yes = outcome_yes
         rec.resolved = True
         rec.resolution_ts = datetime.datetime.utcnow().isoformat()
+        rec.resolution_source = resolution_source
         if pnl_usd is not None:
             rec.trade_pnl_usd = pnl_usd
+        if outcome_yes is None:
+            return rec
         actual = 1.0 if outcome_yes else 0.0
         for persona, prob in (rec.agent_estimates or {}).items():
             try:
