@@ -232,7 +232,7 @@ class MarketPatternLearner:
         resolved = [o for o in observations if o.resolved_yes is not None]
         bucket_outcomes: dict[tuple, list[bool]] = defaultdict(list)
         for o in resolved:
-            key = (round(o.bucket_low / 5) * 5, round(o.bucket_high / 5) * 5)
+            key = self._bucket_cluster_key(o.bucket_low, o.bucket_high)
             bucket_outcomes[key].append(o.resolved_yes)
 
         edges = []
@@ -259,6 +259,12 @@ class MarketPatternLearner:
                         ),
                     ))
         return edges
+
+    def _bucket_cluster_key(self, bucket_low: float, bucket_high: float) -> tuple[float, float]:
+        """Cluster bucket bounds while preserving open-ended threshold markets."""
+        lo = float("-inf") if bucket_low == float("-inf") else round(bucket_low / 5) * 5
+        hi = float("inf") if bucket_high == float("inf") else round(bucket_high / 5) * 5
+        return lo, hi
 
     # ─── Main analysis ────────────────────────────────────────────────────────
 
