@@ -82,6 +82,17 @@ python main.py --run --live
 python main.py --telegram-control
 ```
 
+After installing the local launcher, type:
+
+```bash
+albert
+```
+
+This opens the Albert setup/control menu for setup, dry-run cycles, demo mode,
+TUI dashboard, Telegram remote control, positions, learning status, and data
+utilities. Direct commands also work, for example `albert setup`,
+`albert control`, `albert demo-once`, and `albert tui`.
+
 ---
 
 ## Configuration

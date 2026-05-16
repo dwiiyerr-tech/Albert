@@ -68,6 +68,8 @@ _ENV_PATH = Path(__file__).parent / ".env"
 
 _LLM_MODELS = [
     ("claude-sonnet-4-6",  "Sonnet 4.6  — fast, capable, cost-effective  (recommended)"),
+    ("MiniMax-M2.7",       "MiniMax M2.7 — strong OpenAI-compatible reasoning model"),
+    ("MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed — faster MiniMax endpoint"),
     ("gpt-4.1",            "OpenAI GPT-4.1 — OpenAI-compatible APIs"),
     ("deepseek-chat",      "DeepSeek Chat — OpenAI-compatible APIs"),
     ("openrouter/auto",    "OpenRouter Auto — route to an available model"),
@@ -328,11 +330,14 @@ def _step_llm(existing: dict, settings: dict, step: int, total: int) -> None:
     if provider == "mock":
         settings["LLM_BASE_URL"] = ""
     elif provider == "openai-compatible":
+        default_base_url = "https://api.openai.com/v1"
+        if model.startswith("MiniMax-"):
+            default_base_url = "https://api.minimax.io/v1"
         url = _prompt_str(
             "  LLM_BASE_URL",
-            default=existing_url or "https://api.openai.com/v1",
+            default=existing_url or default_base_url,
             required=True,
-            description="Base URL ending before /chat/completions, e.g. https://api.openai.com/v1",
+            description="Base URL ending before /chat/completions, e.g. https://api.openai.com/v1 or https://api.minimax.io/v1",
         )
         settings["LLM_BASE_URL"] = url.rstrip("/")
         console.print(f"  [dim]Requests will go to: {url}[/]")

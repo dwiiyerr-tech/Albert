@@ -1,0 +1,18 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+ALBERT_HOME="${ALBERT_HOME:-/data/data/com.termux/files/home/Albert}"
+
+if [ ! -d "$ALBERT_HOME" ]; then
+  echo "Albert project not found: $ALBERT_HOME" >&2
+  exit 1
+fi
+
+if [ -x "$ALBERT_HOME/.venv/bin/python" ]; then
+  PYTHON="$ALBERT_HOME/.venv/bin/python"
+else
+  PYTHON="python"
+fi
+
+cd "$ALBERT_HOME"
+exec "$PYTHON" "$ALBERT_HOME/albert_cli.py" "$@"
