@@ -31,7 +31,9 @@ from typing import TYPE_CHECKING, Optional
 from config import (
     MAX_AGENTS_PER_SIM, SIM_ROUNDS,
     PERSONA_WEIGHTING, SCENARIO_SPECULATION, SCENARIO_THRESHOLD_F,
+    USE_WEATHER_NORMALS, WEATHER_NORMALS_FILE,
 )
+from learning import WeatherNormalStore
 from llm_client import LLMClient
 from weather_data import CityForecast
 
@@ -138,6 +140,9 @@ class WeatherSimulation:
         self._exp_memory = experience_memory
         self._sim_rounds = sim_rounds if sim_rounds is not None else SIM_ROUNDS
         self._use_scenarios = SCENARIO_SPECULATION
+        self._weather_normals = (
+            WeatherNormalStore(WEATHER_NORMALS_FILE) if USE_WEATHER_NORMALS else None
+        )
 
     # ─── Shared helpers ───────────────────────────────────────────────────────
 
@@ -157,6 +162,15 @@ class WeatherSimulation:
             f"  METAR obs: {f'{forecast.metar.temp_f:.1f}°F' if forecast.metar else 'N/A'}\n"
             f"  Consensus: {f'{forecast.consensus_temp_f:.1f}°F' if forecast.consensus_temp_f else 'N/A'}\n"
             f"  Model spread: {f'{forecast.model_spread_f:.1f}°F' if forecast.model_spread_f else 'N/A'}"
+        )
+
+    def _normal_block(self, forecast: CityForecast, target_date: str) -> str:
+        if self._weather_normals is None:
+            return ""
+        return self._weather_normals.prompt_block(
+            city=forecast.city,
+            target_date=target_date,
+            consensus_temp_f=forecast.consensus_temp_f,
         )
 
     def _learned_context(self, city: str) -> str:
@@ -243,6 +257,7 @@ Date: {target_date}
 Temperature bucket under analysis: {bucket}
 Model data:
 {self._forecast_block(forecast)}
+{self._normal_block(forecast, target_date)}
 
 Rules:
 - {n_scenarios} scenarios, mutually exclusive, collectively exhaustive.
@@ -343,6 +358,7 @@ City: {forecast.city} | Date: {target_date}
 Temperature bucket under analysis: {bucket}
 Model data:
 {self._forecast_block(forecast)}
+{self._normal_block(forecast, target_date)}
 {learned}
 The following {len(scenarios)} weather scenarios have been identified:
 {scenario_block}
@@ -425,6 +441,7 @@ Respond ONLY with valid JSON:
         forecast: CityForecast,
         bucket_low: float,
         bucket_high: float,
+        target_date: str,
     ) -> str:
         bucket = self._bucket_desc(bucket_low, bucket_high)
 
@@ -457,7 +474,8 @@ Respond ONLY with valid JSON:
         return f"""You are River (Bayesian Synthesizer), a statistical weather forecast expert.
 Your role: assess the quality and confidence of a scenario-weighted probability estimate.
 
-City: {forecast.city} | Bucket: {bucket}
+City: {forecast.city} | Date: {target_date} | Bucket: {bucket}
+{self._normal_block(forecast, target_date)}
 
 Scenario breakdown:
 {contrib_lines}
@@ -489,13 +507,14 @@ Respond ONLY with valid JSON:
         forecast: CityForecast,
         bucket_low: float,
         bucket_high: float,
+        target_date: str,
     ) -> tuple[str, float, str]:
         """Returns (confidence_level, adjusted_probability, reasoning)."""
         try:
             text = self._client.text(
                 max_tokens=400,
                 system=self._river_system_prompt(
-                    scenarios, turns, computed_p, forecast, bucket_low, bucket_high
+                    scenarios, turns, computed_p, forecast, bucket_low, bucket_high, target_date
                 ),
                 messages=[{"role": "user", "content": "Synthesise the forecast now."}],
             )
@@ -555,7 +574,7 @@ Respond ONLY with valid JSON:
 
         # Phase 3 — River synthesis and confidence assessment
         confidence, final_p, reasoning = self._run_river(
-            scenarios, turns, computed_p, forecast, bucket_low, bucket_high
+            scenarios, turns, computed_p, forecast, bucket_low, bucket_high, target_date
         )
 
         logger.info(
@@ -600,6 +619,7 @@ You are participating in a structured forecast debate for:
 
 Available forecast data:
 {self._forecast_block(forecast)}
+{self._normal_block(forecast, target_date)}
 {learned}
 After your analysis, you MUST end your response with exactly this JSON line (no other JSON):
 {{"p": <float 0.0–1.0>}}

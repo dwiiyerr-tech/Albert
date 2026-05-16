@@ -186,6 +186,10 @@ throttle demo/live position size during BTC high-volatility, crash, or risk-off
 regimes. The regime layer only reduces size; it does not increase above the
 normal EV/Kelly recommendation.
 
+When `USE_WEATHER_NORMALS=true`, Albert also reads
+`weather_city_month_normals.jsonl` and injects city/month climatology plus
+forecast anomaly into the Morgan, analyst, River, and classic-debate prompts.
+
 ---
 
 ## Project Structure

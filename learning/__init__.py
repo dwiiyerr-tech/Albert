@@ -7,6 +7,8 @@ __all__ = [
     "MarketPatternLearner",
     "RiskRegimeStore",
     "RiskRegime",
+    "WeatherNormalStore",
+    "WeatherNormal",
 ]
 
 
@@ -30,4 +32,7 @@ def __getattr__(name):
     if name in {"RiskRegimeStore", "RiskRegime"}:
         from .risk_regime import RiskRegimeStore, RiskRegime
         return {"RiskRegimeStore": RiskRegimeStore, "RiskRegime": RiskRegime}[name]
+    if name in {"WeatherNormalStore", "WeatherNormal"}:
+        from .weather_normals import WeatherNormalStore, WeatherNormal
+        return {"WeatherNormalStore": WeatherNormalStore, "WeatherNormal": WeatherNormal}[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

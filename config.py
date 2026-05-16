@@ -177,6 +177,13 @@ RISK_REGIME_FILE = os.getenv(
     "RISK_REGIME_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "processed", "btc_risk_regimes_1d.jsonl"),
 )
+USE_WEATHER_NORMALS = (
+    os.getenv("USE_WEATHER_NORMALS", "true").lower() != "false"
+)
+WEATHER_NORMALS_FILE = os.getenv(
+    "WEATHER_NORMALS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "processed", "weather_city_month_normals.jsonl"),
+)
 
 # ─── Monitored Cities ────────────────────────────────────────────────────────
 CITIES = [
