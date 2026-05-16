@@ -4,8 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from remote_control.telegram_bot import (
+    RemoteNotificationSettings,
     RemoteControlCommandHandler,
     RemoteControlPolicy,
+    TelegramRemoteControlBot,
+    format_cycle_report,
+    format_pnl_report,
     parse_command,
 )
 from trading.position_manager import PositionManager
@@ -64,7 +68,7 @@ class RemoteControlTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         policy = RemoteControlPolicy.from_strings(
             allowed_chat_ids=allowed_chat_ids,
-            allowed_commands=allowed_commands or "status,positions,signals,learning,dry_run_once",
+            allowed_commands=allowed_commands or "status,positions,signals,learning,pnl,dry_run_once",
             audit_log=str(Path(tmp.name) / "remote.log"),
         )
         agent = _FakeAgent(str(Path(tmp.name) / "positions.json"))
@@ -100,6 +104,40 @@ class RemoteControlTests(unittest.TestCase):
         self.assertIn("Albert Status", status)
         self.assertIn("Dry-run cycle selesai", run)
         self.assertEqual(agent.cycles_run, 1)
+
+    def test_pnl_and_cycle_report_formatting(self):
+        handler, agent = self._handler()
+
+        pnl = handler.handle("/pnl", chat_id=123)
+        ok_cycle = format_cycle_report(agent, signals_count=2, duration_seconds=1.2)
+        error_cycle = format_cycle_report(agent, signals_count=0, duration_seconds=0.5, error=RuntimeError("boom"))
+
+        self.assertIn("Albert P&L Report", pnl)
+        self.assertIn("Errors: 0", ok_cycle)
+        self.assertIn("Errors: 1", error_cycle)
+        self.assertIn("RuntimeError", error_cycle)
+
+    def test_notification_settings_and_send_targets(self):
+        handler, _agent = self._handler(allowed_chat_ids="123,456")
+        bot = TelegramRemoteControlBot(token="test-token", handler=handler)
+        sent = []
+        bot._send_message = lambda chat_id, text: sent.append((str(chat_id), text))
+        settings = RemoteNotificationSettings.from_strings(
+            notification_chat_ids="789",
+            pnl_report_interval_hours=24,
+        )
+
+        count = bot.send_notification("hello", settings.notification_chat_ids)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(sent, [("789", "hello")])
+
+    def test_format_pnl_report(self):
+        _handler, agent = self._handler()
+        report = format_pnl_report(agent, interval_hours=24)
+
+        self.assertIn("Window: last 24h", report)
+        self.assertIn("Net P&L", report)
 
 
 if __name__ == "__main__":

@@ -220,6 +220,7 @@ Safe command set:
 /positions     open/closed position summary
 /signals       latest cycle signals
 /learning      learning and persona score summary
+/pnl           profit/loss report now
 /dry_run_once  run one dry-run cycle
 /demo_once     run one isolated virtual demo cycle
 /pause         pause remote-managed daemon loop
@@ -233,15 +234,32 @@ REMOTE_CONTROL_ENABLED=false
 REMOTE_CONTROL_PROVIDER=telegram
 TELEGRAM_BOT_TOKEN=123456:bot-token-from-botfather
 REMOTE_ALLOWED_CHAT_IDS=123456789
-REMOTE_ALLOWED_COMMANDS=status,positions,signals,learning,pause,resume,dry_run_once,demo_once
+REMOTE_ALLOWED_COMMANDS=status,positions,signals,learning,pnl,pause,resume,dry_run_once,demo_once
 REMOTE_ALLOW_LIVE=false
 REMOTE_AUDIT_LOG=remote_control.log
+REMOTE_NOTIFY_CYCLE_SUMMARY=true
+REMOTE_NOTIFY_ERRORS=true
+REMOTE_DAILY_PNL_ENABLED=true
+REMOTE_PNL_REPORT_INTERVAL_HOURS=24
+REMOTE_PNL_REPORT_ON_START=false
 REMOTE_DEMO_POSITIONS_FILE=.demo_runs/telegram_demo_positions.json
 ```
 
 To discover your chat ID, start the bot with `python main.py --telegram-control`,
 send `/whoami`, then add the returned ID to `REMOTE_ALLOWED_CHAT_IDS` by rerunning
 the setup wizard locally.
+
+For automatic notifications, run Telegram control together with the remote
+daemon:
+
+```bash
+python main.py --telegram-control --daemon
+```
+
+With the defaults above, Albert sends a cycle report after every daemon cycle,
+sends a Telegram alert if a cycle errors, and sends a profit/loss report every
+24 hours. Set `REMOTE_NOTIFICATION_CHAT_IDS` if alerts should go to a different
+chat than the command allowlist.
 
 ---
 

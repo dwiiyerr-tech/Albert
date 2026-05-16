@@ -111,11 +111,17 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 REMOTE_ALLOWED_CHAT_IDS = os.getenv("REMOTE_ALLOWED_CHAT_IDS", "")
 REMOTE_ALLOWED_COMMANDS = os.getenv(
     "REMOTE_ALLOWED_COMMANDS",
-    "status,positions,signals,learning,pause,resume,dry_run_once,demo_once",
+    "status,positions,signals,learning,pnl,pause,resume,dry_run_once,demo_once",
 )
 REMOTE_ALLOW_LIVE = os.getenv("REMOTE_ALLOW_LIVE", "false").lower() == "true"
 REMOTE_AUDIT_LOG = os.getenv("REMOTE_AUDIT_LOG", "remote_control.log")
 REMOTE_POLL_INTERVAL_SECONDS = float(os.getenv("REMOTE_POLL_INTERVAL_SECONDS", "2.0"))
+REMOTE_NOTIFICATION_CHAT_IDS = os.getenv("REMOTE_NOTIFICATION_CHAT_IDS", "")
+REMOTE_NOTIFY_CYCLE_SUMMARY = os.getenv("REMOTE_NOTIFY_CYCLE_SUMMARY", "true").lower() != "false"
+REMOTE_NOTIFY_ERRORS = os.getenv("REMOTE_NOTIFY_ERRORS", "true").lower() != "false"
+REMOTE_DAILY_PNL_ENABLED = os.getenv("REMOTE_DAILY_PNL_ENABLED", "true").lower() != "false"
+REMOTE_PNL_REPORT_INTERVAL_HOURS = float(os.getenv("REMOTE_PNL_REPORT_INTERVAL_HOURS", "24.0"))
+REMOTE_PNL_REPORT_ON_START = os.getenv("REMOTE_PNL_REPORT_ON_START", "false").lower() == "true"
 REMOTE_DEMO_BALANCE = float(os.getenv("REMOTE_DEMO_BALANCE", "1000.0"))
 REMOTE_DEMO_POSITIONS_FILE = os.getenv(
     "REMOTE_DEMO_POSITIONS_FILE",

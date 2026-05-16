@@ -247,6 +247,9 @@ def _save_env(settings: dict[str, str]) -> None:
          ["REMOTE_CONTROL_ENABLED", "REMOTE_CONTROL_PROVIDER", "TELEGRAM_BOT_TOKEN",
           "REMOTE_ALLOWED_CHAT_IDS", "REMOTE_ALLOWED_COMMANDS", "REMOTE_ALLOW_LIVE",
           "REMOTE_AUDIT_LOG", "REMOTE_POLL_INTERVAL_SECONDS",
+          "REMOTE_NOTIFICATION_CHAT_IDS", "REMOTE_NOTIFY_CYCLE_SUMMARY",
+          "REMOTE_NOTIFY_ERRORS", "REMOTE_DAILY_PNL_ENABLED",
+          "REMOTE_PNL_REPORT_INTERVAL_HOURS", "REMOTE_PNL_REPORT_ON_START",
           "REMOTE_DEMO_BALANCE", "REMOTE_DEMO_POSITIONS_FILE",
           "REMOTE_DEMO_TOKEN_BUDGET", "REMOTE_DEMO_SIM_ROUNDS"]),
         ("# ─── Risk Parameters ────────────────────────────────────────────────────",
@@ -466,7 +469,7 @@ def _step_remote_control(existing: dict, settings: dict, step: int, total: int) 
         "REMOTE_ALLOWED_COMMANDS",
         default=existing.get(
             "REMOTE_ALLOWED_COMMANDS",
-            "status,positions,signals,learning,pause,resume,dry_run_once,demo_once",
+            "status,positions,signals,learning,pnl,pause,resume,dry_run_once,demo_once",
         ),
         required=False,
         description="Comma-separated command allowlist. Keep live commands out for safety.",
@@ -495,6 +498,44 @@ def _step_remote_control(existing: dict, settings: dict, step: int, total: int) 
         description="Seconds between Telegram polling retries after empty/error responses.",
         min_val=0.5,
     ))
+    console.print()
+    settings["REMOTE_NOTIFICATION_CHAT_IDS"] = _prompt_str(
+        "REMOTE_NOTIFICATION_CHAT_IDS",
+        default=existing.get("REMOTE_NOTIFICATION_CHAT_IDS", ""),
+        required=False,
+        description="Optional comma-separated IDs for alerts/reports. Blank = use REMOTE_ALLOWED_CHAT_IDS.",
+    )
+    console.print()
+    settings["REMOTE_NOTIFY_CYCLE_SUMMARY"] = "true" if _prompt_bool(
+        "REMOTE_NOTIFY_CYCLE_SUMMARY",
+        default=existing.get("REMOTE_NOTIFY_CYCLE_SUMMARY", "true").lower() != "false",
+        description="Send a Telegram notification after each remote daemon cycle, even when there is no error.",
+    ) else "false"
+    console.print()
+    settings["REMOTE_NOTIFY_ERRORS"] = "true" if _prompt_bool(
+        "REMOTE_NOTIFY_ERRORS",
+        default=existing.get("REMOTE_NOTIFY_ERRORS", "true").lower() != "false",
+        description="Send Telegram alert when a remote daemon cycle throws an error.",
+    ) else "false"
+    console.print()
+    settings["REMOTE_DAILY_PNL_ENABLED"] = "true" if _prompt_bool(
+        "REMOTE_DAILY_PNL_ENABLED",
+        default=existing.get("REMOTE_DAILY_PNL_ENABLED", "true").lower() != "false",
+        description="Send periodic profit/loss reports.",
+    ) else "false"
+    console.print()
+    settings["REMOTE_PNL_REPORT_INTERVAL_HOURS"] = str(_prompt_float(
+        "REMOTE_PNL_REPORT_INTERVAL_HOURS",
+        default=float(existing.get("REMOTE_PNL_REPORT_INTERVAL_HOURS", "24.0")),
+        description="Hours between automatic P&L reports. Use 24 for once per day.",
+        min_val=0.25,
+    ))
+    console.print()
+    settings["REMOTE_PNL_REPORT_ON_START"] = "true" if _prompt_bool(
+        "REMOTE_PNL_REPORT_ON_START",
+        default=existing.get("REMOTE_PNL_REPORT_ON_START", "false").lower() == "true",
+        description="Send one P&L report immediately when Telegram control starts.",
+    ) else "false"
     console.print()
     settings["REMOTE_DEMO_BALANCE"] = str(_prompt_float(
         "REMOTE_DEMO_BALANCE",
@@ -676,6 +717,11 @@ def _step_review(settings: dict, step: int, total: int) -> bool:
                                "TELEGRAM_BOT_TOKEN", "REMOTE_ALLOWED_CHAT_IDS",
                                "REMOTE_ALLOWED_COMMANDS", "REMOTE_ALLOW_LIVE",
                                "REMOTE_AUDIT_LOG", "REMOTE_POLL_INTERVAL_SECONDS",
+                               "REMOTE_NOTIFICATION_CHAT_IDS",
+                               "REMOTE_NOTIFY_CYCLE_SUMMARY", "REMOTE_NOTIFY_ERRORS",
+                               "REMOTE_DAILY_PNL_ENABLED",
+                               "REMOTE_PNL_REPORT_INTERVAL_HOURS",
+                               "REMOTE_PNL_REPORT_ON_START",
                                "REMOTE_DEMO_BALANCE", "REMOTE_DEMO_POSITIONS_FILE",
                                "REMOTE_DEMO_TOKEN_BUDGET", "REMOTE_DEMO_SIM_ROUNDS"],
         "Risk Parameters":    ["MIN_EV", "KELLY_FRACTION", "MAX_TRADE_SIZE_USD", "STOP_LOSS_PCT", "TRAILING_STOP_TRIGGER"],

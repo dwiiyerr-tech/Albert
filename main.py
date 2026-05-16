@@ -66,6 +66,12 @@ from config import (
     REMOTE_ALLOW_LIVE,
     REMOTE_AUDIT_LOG,
     REMOTE_POLL_INTERVAL_SECONDS,
+    REMOTE_NOTIFICATION_CHAT_IDS,
+    REMOTE_NOTIFY_CYCLE_SUMMARY,
+    REMOTE_NOTIFY_ERRORS,
+    REMOTE_DAILY_PNL_ENABLED,
+    REMOTE_PNL_REPORT_INTERVAL_HOURS,
+    REMOTE_PNL_REPORT_ON_START,
     REMOTE_DEMO_BALANCE,
     REMOTE_DEMO_POSITIONS_FILE,
     REMOTE_DEMO_TOKEN_BUDGET,
@@ -1203,9 +1209,12 @@ def _run_telegram_control(args) -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required. Run python main.py --setup first.")
 
     from remote_control import (
+        RemoteNotificationSettings,
         RemoteControlCommandHandler,
         RemoteControlPolicy,
         TelegramRemoteControlBot,
+        format_cycle_report,
+        format_pnl_report,
     )
 
     remote_live = bool(args.live and REMOTE_ALLOW_LIVE)
@@ -1223,6 +1232,14 @@ def _run_telegram_control(args) -> None:
         logger.warning(
             "REMOTE_ALLOWED_CHAT_IDS is empty. Only /whoami and /help will work until a chat ID is configured."
         )
+    notifications = RemoteNotificationSettings.from_strings(
+        notification_chat_ids=REMOTE_NOTIFICATION_CHAT_IDS,
+        notify_cycle_summary=REMOTE_NOTIFY_CYCLE_SUMMARY,
+        notify_errors=REMOTE_NOTIFY_ERRORS,
+        daily_pnl_enabled=REMOTE_DAILY_PNL_ENABLED,
+        pnl_report_interval_hours=REMOTE_PNL_REPORT_INTERVAL_HOURS,
+        pnl_report_on_start=REMOTE_PNL_REPORT_ON_START,
+    )
 
     def _demo_runner() -> str:
         from demo.session import DemoSession
@@ -1259,6 +1276,34 @@ def _run_telegram_control(args) -> None:
         demo_runner=_demo_runner,
     )
 
+    bot = TelegramRemoteControlBot(
+        token=TELEGRAM_BOT_TOKEN,
+        handler=handler,
+        poll_interval_seconds=REMOTE_POLL_INTERVAL_SECONDS,
+    )
+    notify_targets = notifications.notification_chat_ids or policy.allowed_chat_ids
+
+    def _notify(text: str) -> None:
+        sent = bot.send_notification(text, notify_targets)
+        if sent == 0:
+            logger.debug("Remote notification skipped: no target chat IDs configured")
+
+    def _sleep_interruptibly(seconds: float) -> None:
+        sleep_until = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < sleep_until:
+            time.sleep(min(5.0, sleep_until - time.monotonic()))
+
+    if notifications.daily_pnl_enabled:
+        def _pnl_report_loop() -> None:
+            interval_seconds = max(60.0, notifications.pnl_report_interval_hours * 3600.0)
+            if notifications.pnl_report_on_start:
+                _notify(format_pnl_report(agent, interval_hours=notifications.pnl_report_interval_hours))
+            while True:
+                _sleep_interruptibly(interval_seconds)
+                _notify(format_pnl_report(agent, interval_hours=notifications.pnl_report_interval_hours))
+
+        threading.Thread(target=_pnl_report_loop, name="telegram-pnl-report", daemon=True).start()
+
     if args.daemon:
         def _daemon_loop() -> None:
             logger.info("Starting remote-managed dry daemon")
@@ -1266,22 +1311,29 @@ def _run_telegram_control(args) -> None:
                 if handler.paused:
                     time.sleep(5)
                     continue
+                started = time.monotonic()
                 try:
                     signals = handler.run_daemon_cycle()
                     logger.info("Remote daemon cycle complete: %d signals", len(signals))
+                    if notifications.notify_cycle_summary:
+                        _notify(format_cycle_report(
+                            agent,
+                            signals_count=len(signals),
+                            duration_seconds=time.monotonic() - started,
+                        ))
                 except Exception as exc:
                     logger.error("Remote daemon cycle error: %s", exc, exc_info=True)
-                sleep_until = time.monotonic() + UPDATE_INTERVAL_SECONDS
-                while time.monotonic() < sleep_until:
-                    time.sleep(min(5.0, sleep_until - time.monotonic()))
+                    if notifications.notify_errors:
+                        _notify(format_cycle_report(
+                            agent,
+                            signals_count=0,
+                            duration_seconds=time.monotonic() - started,
+                            error=exc,
+                        ))
+                _sleep_interruptibly(UPDATE_INTERVAL_SECONDS)
 
         threading.Thread(target=_daemon_loop, name="telegram-daemon", daemon=True).start()
 
-    bot = TelegramRemoteControlBot(
-        token=TELEGRAM_BOT_TOKEN,
-        handler=handler,
-        poll_interval_seconds=REMOTE_POLL_INTERVAL_SECONDS,
-    )
     logger.info("Telegram control ready. Send /whoami to the bot to verify chat ID.")
     bot.run_forever()
 

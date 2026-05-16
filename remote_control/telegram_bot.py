@@ -26,6 +26,7 @@ SAFE_DEFAULT_COMMANDS = {
     "positions",
     "signals",
     "learning",
+    "pnl",
     "pause",
     "resume",
     "dry_run_once",
@@ -99,6 +100,36 @@ class RemoteControlPolicy:
         return command in self.allowed_commands
 
 
+@dataclass
+class RemoteNotificationSettings:
+    notification_chat_ids: set[str] = field(default_factory=set)
+    notify_cycle_summary: bool = True
+    notify_errors: bool = True
+    daily_pnl_enabled: bool = True
+    pnl_report_interval_hours: float = 24.0
+    pnl_report_on_start: bool = False
+
+    @classmethod
+    def from_strings(
+        cls,
+        *,
+        notification_chat_ids: str = "",
+        notify_cycle_summary: bool = True,
+        notify_errors: bool = True,
+        daily_pnl_enabled: bool = True,
+        pnl_report_interval_hours: float = 24.0,
+        pnl_report_on_start: bool = False,
+    ) -> "RemoteNotificationSettings":
+        return cls(
+            notification_chat_ids={str(item) for item in _csv_set(notification_chat_ids)},
+            notify_cycle_summary=notify_cycle_summary,
+            notify_errors=notify_errors,
+            daily_pnl_enabled=daily_pnl_enabled,
+            pnl_report_interval_hours=max(0.01, float(pnl_report_interval_hours)),
+            pnl_report_on_start=pnl_report_on_start,
+        )
+
+
 def canonical_command(raw: str) -> str:
     command = raw.strip().lower().replace("-", "_")
     return ALIASES.get(command, command)
@@ -113,6 +144,59 @@ def parse_command(text: str) -> tuple[str, str]:
         first = first[1:]
     first = first.split("@", 1)[0]
     return canonical_command(first), rest.strip()
+
+
+def format_pnl_report(agent, *, interval_hours: float = 24.0, now: datetime.datetime | None = None) -> str:
+    now = now or datetime.datetime.utcnow()
+    since = now - datetime.timedelta(hours=interval_hours)
+    positions = agent.positions
+    summary = positions.summary()
+    risk = positions.risk_snapshot(now)
+    realized_period = positions.realized_pnl_since(since)
+    closed_period = positions.closed_count_since(since)
+    opened_period = positions.opened_count_since(since)
+    win_rate = summary["win_rate"]
+    win_rate_text = "N/A" if win_rate is None else f"{win_rate:.1%}"
+    return (
+        "Albert P&L Report\n"
+        f"Window: last {interval_hours:g}h\n"
+        f"Opened: {opened_period} | Closed: {closed_period}\n"
+        f"Realized P&L: ${realized_period:+.2f}\n"
+        f"Closed P&L total: ${summary['total_pnl_usd']:+.2f}\n"
+        f"Unrealized P&L: ${summary['unrealized_pnl_usd']:+.2f}\n"
+        f"Net P&L: ${risk['net_pnl_usd']:+.2f}\n"
+        f"Open deployed: ${summary['open_deployed_usd']:.2f}\n"
+        f"Open planned risk: ${summary['open_planned_risk_usd']:.2f}\n"
+        f"Daily loss: ${risk['daily_loss_usd']:.2f}\n"
+        f"Drawdown: ${risk['drawdown_usd']:.2f}\n"
+        f"Win rate: {win_rate_text}"
+    )
+
+
+def format_cycle_report(agent, *, signals_count: int, duration_seconds: float, error: Exception | None = None) -> str:
+    summary = agent.positions.summary()
+    risk = agent.positions.risk_snapshot()
+    if error is None:
+        return (
+            "Albert Cycle Report\n"
+            "Status: OK\n"
+            "Errors: 0\n"
+            f"Duration: {duration_seconds:.1f}s\n"
+            f"Signals: {signals_count}\n"
+            f"Open positions: {summary['open_positions']}\n"
+            f"Deployed: ${summary['open_deployed_usd']:.2f}\n"
+            f"Unrealized P&L: ${summary['unrealized_pnl_usd']:+.2f}\n"
+            f"Net P&L: ${risk['net_pnl_usd']:+.2f}\n"
+            f"Daily loss: ${risk['daily_loss_usd']:.2f}"
+        )
+    return (
+        "Albert Cycle Report\n"
+        "Status: ERROR\n"
+        "Errors: 1\n"
+        f"Duration: {duration_seconds:.1f}s\n"
+        f"Error type: {type(error).__name__}\n"
+        f"Message: {str(error)[:500]}"
+    )
 
 
 class RemoteControlCommandHandler:
@@ -185,6 +269,7 @@ class RemoteControlCommandHandler:
             "/positions - daftar posisi terbuka\n"
             "/signals - sinyal terakhir\n"
             "/learning - statistik learning/persona\n"
+            "/pnl - laporan profit/loss sekarang\n"
             "/dry_run_once - jalankan 1 dry-run cycle\n"
             "/demo_once - jalankan 1 demo cycle virtual\n"
             "/pause - pause daemon remote\n"
@@ -203,6 +288,8 @@ class RemoteControlCommandHandler:
             return self._signals_text()
         if command == "learning":
             return self._learning_text()
+        if command == "pnl":
+            return self._pnl_text()
         if command == "pause":
             self.paused = True
             return "Albert remote daemon dipause. Command manual tetap bisa dipanggil dari allowlist."
@@ -298,6 +385,9 @@ class RemoteControlCommandHandler:
                     f"brier={row['avg_brier']} weight={row['weight']}"
                 )
         return "\n".join(lines)
+
+    def _pnl_text(self) -> str:
+        return format_pnl_report(self.agent)
 
     def _dry_run_once(self) -> str:
         if self.paused:
@@ -403,6 +493,20 @@ class TelegramRemoteControlBot:
             username = user.get("username") or user.get("first_name") or ""
             response = self.handler.handle(text, chat_id, username)
             self._send_message(chat_id, response)
+
+    def send_notification(
+        self,
+        text: str,
+        chat_ids: Iterable[int | str] | None = None,
+    ) -> int:
+        targets = [str(chat_id) for chat_id in (chat_ids or self.handler.policy.allowed_chat_ids)]
+        sent = 0
+        for chat_id in sorted(set(targets)):
+            if not chat_id:
+                continue
+            self._send_message(chat_id, text)
+            sent += 1
+        return sent
 
     def _get_updates(self) -> list[dict]:
         params = {
