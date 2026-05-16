@@ -105,12 +105,10 @@ class PositionManager:
         target_date: str,
         order_id: str = "",
     ) -> Position:
-        # Fix: stop-loss direction depends on YES vs NO position.
-        # YES (long): stop below entry;  NO (short): stop above entry.
-        if direction == "YES":
-            stop = entry_price * (1 - STOP_LOSS_PCT)
-        else:
-            stop = entry_price * (1 + STOP_LOSS_PCT)
+        # The executor buys the selected outcome token. YES and NO positions are
+        # both long token exposures, so loss control is below the entry price.
+        direction = direction.upper()
+        stop = entry_price * (1 - STOP_LOSS_PCT)
 
         pos = Position(
             market_id=market_id,
@@ -137,11 +135,9 @@ class PositionManager:
             return None
         pos.current_price = current_price
 
-        # Trailing stop activation: profit direction depends on YES vs NO
-        if pos.direction == "YES":
-            profit_pct = (current_price - pos.entry_price) / pos.entry_price
-        else:  # NO: profit when price falls
-            profit_pct = (pos.entry_price - current_price) / pos.entry_price
+        # Positions track the price of the token we bought. Profit always means
+        # the owned token price rose, whether that token is YES or NO.
+        profit_pct = (current_price - pos.entry_price) / pos.entry_price
 
         if not pos.trailing_active and profit_pct >= TRAILING_STOP_TRIGGER:
             pos.trailing_active = True
@@ -150,22 +146,14 @@ class PositionManager:
 
         # Update trailing stop in the favourable direction
         if pos.trailing_active:
-            if pos.direction == "YES":
-                new_stop = current_price * (1 - STOP_LOSS_PCT)
-                if new_stop > pos.stop_price:
-                    pos.stop_price = new_stop
-            else:
-                new_stop = current_price * (1 + STOP_LOSS_PCT)
-                if new_stop < pos.stop_price:
-                    pos.stop_price = new_stop
+            new_stop = current_price * (1 - STOP_LOSS_PCT)
+            if new_stop > pos.stop_price:
+                pos.stop_price = new_stop
 
         # Check stop-loss trigger
-        triggered = (
-            (pos.direction == "YES" and current_price <= pos.stop_price)
-            or (pos.direction == "NO" and current_price >= pos.stop_price)
-        )
-        if triggered:
-            return self._close(pos, "stop_loss")
+        if current_price <= pos.stop_price:
+            self._close(pos, "stop_loss")
+            return "stop_loss"
 
         return None
 
@@ -175,15 +163,32 @@ class PositionManager:
             return None
         return self._close(pos, reason)
 
+    def resolve_position(
+        self,
+        market_id: str,
+        outcome_yes: bool,
+        reason: str = "resolved",
+    ) -> Optional[Position]:
+        """
+        Close a binary outcome position at final payout.
+
+        YES token pays 1.0 when outcome_yes is True; NO token pays 1.0 when
+        outcome_yes is False. The position key remains the YES token/market id
+        so opposite-side duplicate exposure is still blocked.
+        """
+        pos = self.open_positions.get(market_id)
+        if not pos:
+            return None
+        pos.current_price = 1.0 if (
+            (pos.direction == "YES" and outcome_yes)
+            or (pos.direction == "NO" and not outcome_yes)
+        ) else 0.0
+        return self._close(pos, reason)
+
     def _close(self, pos: Position, reason: str) -> Position:
         pos.closed = True
         pos.close_reason = reason
-        # Fix: P&L sign depends on direction.
-        # YES profits when price rises; NO profits when price falls.
-        if pos.direction == "YES":
-            pnl_per_dollar = (pos.current_price - pos.entry_price) / pos.entry_price
-        else:
-            pnl_per_dollar = (pos.entry_price - pos.current_price) / pos.entry_price
+        pnl_per_dollar = (pos.current_price - pos.entry_price) / pos.entry_price
         pos.pnl_usd = pos.size_usd * pnl_per_dollar
         del self.open_positions[pos.market_id]
         self.closed_positions.append(pos)

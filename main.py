@@ -168,6 +168,11 @@ class MiroWeatherAgent:
         Returns count of newly resolved predictions and affected cities.
         """
         unresolved = self.memory.unresolved_records()
+        trade_tagged_markets = {
+            (r.market_id, r.target_date, r.bucket_low, r.bucket_high)
+            for r in unresolved
+            if r.trade_direction
+        }
         newly_resolved = 0
         resolved_cities: set[str] = set()
         today = datetime.date.today()
@@ -205,13 +210,16 @@ class MiroWeatherAgent:
             # Resolve any related open position
             pnl = None
             if rec.market_id and rec.market_id in self.positions.open_positions:
-                open_pos = self.positions.open_positions[rec.market_id]
-                # Cancel the CLOB order if it hasn't fully filled yet (live mode only)
-                if self.executor and self.executor.is_configured() and open_pos.order_id:
-                    self.executor.cancel_order(open_pos.order_id)
-                pos = self.positions.close_position(rec.market_id, reason="resolved")
-                if pos:
-                    pnl = pos.pnl_usd
+                market_key = (rec.market_id, rec.target_date, rec.bucket_low, rec.bucket_high)
+                should_attach_pnl_here = rec.trade_direction or market_key not in trade_tagged_markets
+                if should_attach_pnl_here:
+                    open_pos = self.positions.open_positions[rec.market_id]
+                    # Cancel the CLOB order if it hasn't fully filled yet (live mode only)
+                    if self.executor and self.executor.is_configured() and open_pos.order_id:
+                        self.executor.cancel_order(open_pos.order_id)
+                    pos = self.positions.resolve_position(rec.market_id, outcome_yes, reason="resolved")
+                    if pos:
+                        pnl = pos.pnl_usd
 
             self.memory.resolve_prediction(rec.id, temp_f, outcome_yes, pnl_usd=pnl)
 
@@ -555,6 +563,18 @@ class MiroWeatherAgent:
             return "city/date exposure limit"
         return ""
 
+    def _attach_trade_metadata(self, signal: TradeSignal) -> None:
+        self.memory.attach_trade_to_prediction(
+            city=signal.city,
+            target_date=signal.target_date,
+            bucket_low=signal.bucket_low,
+            bucket_high=signal.bucket_high,
+            market_id=signal.market_id,
+            direction=signal.direction,
+            size_usd=signal.recommended_usd,
+            ev=signal.ev,
+        )
+
     def run_cycle(self, days_ahead: int = 1) -> list[TradeSignal]:
         """
         Run one full analysis + learning cycle.
@@ -663,6 +683,7 @@ class MiroWeatherAgent:
                     bucket_high=signal.bucket_high,
                     target_date=signal.target_date,
                 )
+                self._attach_trade_metadata(signal)
                 self._demo.record_trade(signal, executed=True)
                 logger.info("DEMO TRADE: %s %s %s EV=%.3f $%.2f  (virtual balance: $%.2f)",
                             signal.direction, signal.city, signal.target_date,
@@ -703,6 +724,7 @@ class MiroWeatherAgent:
                     target_date=signal.target_date,
                     order_id=order_id or "",
                 )
+                self._attach_trade_metadata(signal)
                 logger.info(
                     "LIVE TRADE: %s %s %s EV=%.3f $%.2f order_id=%s",
                     signal.direction, signal.city, signal.target_date,

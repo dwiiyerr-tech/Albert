@@ -286,6 +286,49 @@ class ExperienceMemory:
             self.observations.append(obs)
         return obs
 
+    def attach_trade_to_prediction(
+        self,
+        *,
+        city: str,
+        target_date: str,
+        bucket_low: float,
+        bucket_high: float,
+        market_id: str,
+        direction: str,
+        size_usd: float,
+        ev: float,
+    ) -> Optional[PredictionRecord]:
+        """
+        Link an executed trade to the latest matching unresolved prediction.
+
+        The prediction is recorded before portfolio/risk gates execute. When a
+        signal survives those gates, this method tags the corresponding record
+        so later settlement can attach P&L to the forecast that actually traded.
+        """
+        def _same_bucket(a: float, b: float) -> bool:
+            return a == b or abs(float(a) - float(b)) < 1e-9
+
+        with self._lock:
+            candidates = [
+                r for r in self.predictions.values()
+                if not r.resolved
+                and r.city == city
+                and r.target_date == target_date
+                and r.market_id == market_id
+                and _same_bucket(r.bucket_low, bucket_low)
+                and _same_bucket(r.bucket_high, bucket_high)
+            ]
+            if not candidates:
+                logger.debug("No matching prediction found for trade %s %s", city, market_id)
+                return None
+
+            candidates.sort(key=lambda r: r.created_ts, reverse=True)
+            rec = candidates[0]
+            rec.trade_direction = direction
+            rec.trade_size_usd = size_usd
+            rec.trade_ev = ev
+            return rec
+
     def add_lesson(self, lesson: Lesson) -> None:
         with self._lock:
             existing = [l for l in self.lessons if l.content.strip() == lesson.content.strip()]
