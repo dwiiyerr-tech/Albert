@@ -97,6 +97,14 @@ All parameters are in `config.py`:
 | `MAX_ORDERBOOK_SLIPPAGE` | 0.02 | Maximum allowed slippage for effective entry price |
 | `MAX_POSITIONS_PER_CITY_DATE` | 1 | Max open positions per city/date event |
 | `MAX_EXPOSURE_PER_CITY_DATE_USD` | $2 | Max open exposure per city/date event |
+| `MAX_OPEN_POSITIONS` | 20 | Max simultaneous open positions |
+| `MAX_TOTAL_DEPLOYED_USD` | $100 | Max total capital deployed in open positions |
+| `MAX_PORTFOLIO_HEAT_USD` | $20 | Max planned loss to stops across open positions |
+| `MAX_EXPOSURE_PER_TARGET_DATE_USD` | $20 | Max same-resolution-date exposure across cities |
+| `MAX_DAILY_LOSS_USD` | $25 | Block new entries after daily realized plus open losses reach this amount |
+| `MAX_DRAWDOWN_USD` | $50 | Block new entries after total net P&L drawdown reaches this amount |
+| `MAX_DAILY_TRADES` | 20 | Max trades closed per day before blocking new entries |
+| `MIN_REWARD_RISK_RATIO` | 1.5 | Minimum planned reward-to-stop-risk ratio |
 | `KELLY_FRACTION` | 0.25 | Fractional Kelly multiplier |
 | `MAX_TRADE_SIZE_USD` | $20 | Maximum position size |
 | `SIM_ROUNDS` | 3 | Debate rounds per city per bucket |
@@ -104,6 +112,7 @@ All parameters are in `config.py`:
 | `CONSENSUS_THRESHOLD` | 0.65 | High-confidence signal threshold |
 | `STOP_LOSS_PCT` | 0.20 | Stop-loss at 20% below entry |
 | `REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION` | true | For real Polymarket markets, wait for official Gamma/CLOB resolution before settling positions |
+| `MARK_TO_MARKET_OPEN_POSITIONS` | true | Update open public positions from CLOB best bid each cycle and enforce stop/trailing exits |
 
 ---
 

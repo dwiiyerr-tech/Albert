@@ -164,3 +164,14 @@ class PolymarketResolutionClient:
             yes_payout=yes_payout,
             no_payout=no_payout,
         )
+
+    def token_pair(self, token_id: str) -> Optional[tuple[str, str]]:
+        """Return (YES token id, NO token id) for a CLOB token id."""
+        mapping = self._token_mapping(token_id)
+        if not mapping:
+            return None
+        yes = str(mapping.get("primary_token_id") or "")
+        no = str(mapping.get("secondary_token_id") or "")
+        if not yes or not no:
+            return None
+        return yes, no

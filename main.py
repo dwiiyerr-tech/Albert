@@ -37,10 +37,20 @@ from config import (
     DEFAULT_MODE,
     MAX_POSITIONS_PER_CITY_DATE,
     MAX_EXPOSURE_PER_CITY_DATE_USD,
+    MAX_OPEN_POSITIONS,
+    MAX_TOTAL_DEPLOYED_USD,
+    MAX_PORTFOLIO_HEAT_USD,
+    MAX_EXPOSURE_PER_TARGET_DATE_USD,
+    MAX_DAILY_LOSS_USD,
+    MAX_DRAWDOWN_USD,
+    MAX_DAILY_TRADES,
+    MIN_REWARD_RISK_RATIO,
+    STOP_LOSS_PCT,
     SAVE_DEBATE_TRANSCRIPTS,
     SELF_PLAY_REFLECTION,
     DEMO_SYNTHETIC_MARKETS,
     REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION,
+    MARK_TO_MARKET_OPEN_POSITIONS,
     POLYMARKET_API_KEY,
     POLYMARKET_PRIVATE_KEY,
     POLYMARKET_PROXY_ADDRESS,
@@ -178,6 +188,75 @@ class MiroWeatherAgent:
             (bucket_low == float("-inf") or temp_f >= bucket_low)
             and (bucket_high == float("inf") or temp_f < bucket_high)
         )
+
+    def _position_token_id(self, pos) -> str:
+        if pos.direction == "YES":
+            return pos.market_id
+        if pos.no_token_id:
+            return pos.no_token_id
+        pair = self.resolver.token_pair(pos.market_id)
+        if pair:
+            return pair[1]
+        return ""
+
+    def _mark_trade_exit(self, market_id: str, target_date: str, pnl_usd: float, reason: str) -> None:
+        self.memory.mark_trade_exit(
+            market_id=market_id,
+            target_date=target_date,
+            pnl_usd=pnl_usd,
+            reason=reason,
+        )
+
+    def _monitor_open_positions(self) -> list[str]:
+        """
+        Mark open public Polymarket positions to market and enforce stop/trailing
+        exits. Synthetic demo markets have no public order book, so they are
+        settled only by the synthetic weather fallback.
+        """
+        if not MARK_TO_MARKET_OPEN_POSITIONS:
+            return []
+
+        exits: list[str] = []
+        for pos in list(self.positions.open_positions.values()):
+            if not self._is_public_polymarket_market(pos.market_id):
+                continue
+            token_id = self._position_token_id(pos)
+            if not token_id:
+                logger.debug("No token id available for mark-to-market: %s", pos.market_id)
+                continue
+            exit_price = self.scanner.get_token_exit_price(token_id)
+            if exit_price is None:
+                continue
+
+            live_mode = bool(self.executor and self.executor.is_configured())
+            reason = self.positions.update_price(
+                pos.market_id,
+                exit_price,
+                close_on_trigger=not live_mode,
+            )
+            if not reason:
+                continue
+
+            if live_mode:
+                assert self.executor is not None
+                order_id = self.executor.place_exit_order(pos, token_id, exit_price)
+                if not order_id:
+                    logger.warning(
+                        "LIVE exit signal for %s %s but exit order failed; keeping position open",
+                        pos.direction, pos.city,
+                    )
+                    continue
+                closed = self.positions.close_position(pos.market_id, reason=reason)
+            else:
+                closed = self.positions.closed_positions[-1] if self.positions.closed_positions else None
+
+            if closed:
+                self._mark_trade_exit(closed.market_id, closed.target_date, closed.pnl_usd, reason)
+                exits.append(f"{closed.city} {closed.direction} {reason} PnL={closed.pnl_usd:+.2f}")
+
+        if exits:
+            logger.info("Position monitor exits: %s", " | ".join(exits))
+        return exits
 
     # ─── Learning pipeline ────────────────────────────────────────────────────
 
@@ -637,6 +716,47 @@ class MiroWeatherAgent:
             return "city/date exposure limit"
         return ""
 
+    def _planned_trade_risk_usd(self, signal: TradeSignal) -> float:
+        return signal.recommended_usd * STOP_LOSS_PCT
+
+    def _reward_risk_ratio(self, signal: TradeSignal) -> float:
+        planned_loss_per_share = max(0.001, signal.market_price * STOP_LOSS_PCT)
+        reward_per_share = max(0.0, 1.0 - signal.market_price)
+        return reward_per_share / planned_loss_per_share
+
+    def _portfolio_limit_reason(self, signal: TradeSignal) -> str:
+        city_reason = self._city_date_limit_reason(signal)
+        if city_reason:
+            return city_reason
+
+        rr = self._reward_risk_ratio(signal)
+        if rr < MIN_REWARD_RISK_RATIO:
+            return f"reward/risk below {MIN_REWARD_RISK_RATIO:.2f}"
+
+        snapshot = self.positions.risk_snapshot()
+        if snapshot["open_positions"] >= MAX_OPEN_POSITIONS:
+            return "max open positions"
+        if snapshot["opened_today"] >= MAX_DAILY_TRADES:
+            return "daily trade count limit"
+        if snapshot["daily_loss_usd"] >= MAX_DAILY_LOSS_USD:
+            return "daily loss limit"
+        if snapshot["drawdown_usd"] >= MAX_DRAWDOWN_USD:
+            return "drawdown limit"
+
+        deployed = self.positions.open_deployed_usd()
+        if deployed + signal.recommended_usd > MAX_TOTAL_DEPLOYED_USD:
+            return "total deployed limit"
+
+        heat = self.positions.open_planned_risk_usd()
+        if heat + self._planned_trade_risk_usd(signal) > MAX_PORTFOLIO_HEAT_USD:
+            return "portfolio heat limit"
+
+        target_date_exposure = self.positions.target_date_exposure_usd(signal.target_date)
+        if target_date_exposure + signal.recommended_usd > MAX_EXPOSURE_PER_TARGET_DATE_USD:
+            return "target-date exposure limit"
+
+        return ""
+
     def _attach_trade_metadata(self, signal: TradeSignal) -> None:
         self.memory.attach_trade_to_prediction(
             city=signal.city,
@@ -673,6 +793,10 @@ class MiroWeatherAgent:
 
         # ── Step 0: Resolve past predictions and learn from them ──────────────
         newly_resolved, resolved_cities = self._resolve_pending_predictions()
+        mtm_exits = self._monitor_open_positions()
+        if mtm_exits:
+            self.memory.save()
+            self.positions.save()
         if newly_resolved:
             self._run_learning_cycle(newly_resolved, resolved_cities)
             self.memory.save()
@@ -737,7 +861,7 @@ class MiroWeatherAgent:
                 if signal.market_id in self.positions.open_positions:
                     self._demo.record_trade(signal, executed=False, skip_reason="already open")
                     continue
-                limit_reason = self._city_date_limit_reason(signal)
+                limit_reason = self._portfolio_limit_reason(signal)
                 if limit_reason:
                     self._demo.record_trade(signal, executed=False, skip_reason=limit_reason)
                     logger.info("DEMO: %s for %s %s", limit_reason, signal.city, signal.target_date)
@@ -756,6 +880,7 @@ class MiroWeatherAgent:
                     bucket_low=signal.bucket_low,
                     bucket_high=signal.bucket_high,
                     target_date=signal.target_date,
+                    no_token_id=signal.no_token_id,
                 )
                 self._attach_trade_metadata(signal)
                 self._demo.record_trade(signal, executed=True)
@@ -767,7 +892,7 @@ class MiroWeatherAgent:
                 if signal.market_id in self.positions.open_positions:
                     logger.debug("Already open: %s — skipping", signal.market_id)
                     continue
-                limit_reason = self._city_date_limit_reason(signal)
+                limit_reason = self._portfolio_limit_reason(signal)
                 if limit_reason:
                     logger.info("LIVE: %s for %s %s", limit_reason, signal.city, signal.target_date)
                     continue
@@ -797,6 +922,7 @@ class MiroWeatherAgent:
                     bucket_high=signal.bucket_high,
                     target_date=signal.target_date,
                     order_id=order_id or "",
+                    no_token_id=signal.no_token_id,
                 )
                 self._attach_trade_metadata(signal)
                 logger.info(

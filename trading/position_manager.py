@@ -33,10 +33,12 @@ class Position:
     bucket_high: float
     target_date: str
     order_id: str = ""       # CLOB order ID from Polymarket; empty for paper/demo trades
+    no_token_id: str = ""     # CLOB NO token ID; needed to mark NO positions to market
     stop_price: float = 0.0
     trailing_active: bool = False
     closed: bool = False
     close_reason: str = ""
+    closed_at: str = ""
     pnl_usd: float = 0.0
 
     @property
@@ -44,6 +46,17 @@ class Position:
         if self.entry_price <= 0:
             return 0.0
         return (self.current_price - self.entry_price) / self.entry_price
+
+    @property
+    def unrealized_pnl_usd(self) -> float:
+        return self.size_usd * self.unrealized_pnl_pct
+
+    @property
+    def planned_risk_usd(self) -> float:
+        if self.entry_price <= 0:
+            return self.size_usd
+        risk_fraction = max(0.0, (self.entry_price - self.stop_price) / self.entry_price)
+        return self.size_usd * risk_fraction
 
     def to_dict(self) -> dict:
         return self.__dict__
@@ -104,6 +117,7 @@ class PositionManager:
         bucket_high: float,
         target_date: str,
         order_id: str = "",
+        no_token_id: str = "",
     ) -> Position:
         # The executor buys the selected outcome token. YES and NO positions are
         # both long token exposures, so loss control is below the entry price.
@@ -122,13 +136,20 @@ class PositionManager:
             bucket_high=bucket_high,
             target_date=target_date,
             order_id=order_id,
+            no_token_id=no_token_id,
             stop_price=stop,
         )
         self.open_positions[market_id] = pos
         logger.info("Opened %s %s @ %.3f, stop @ %.3f", direction, city, entry_price, stop)
         return pos
 
-    def update_price(self, market_id: str, current_price: float) -> Optional[str]:
+    def update_price(
+        self,
+        market_id: str,
+        current_price: float,
+        *,
+        close_on_trigger: bool = True,
+    ) -> Optional[str]:
         """Update price and check exit conditions. Returns close_reason or None."""
         pos = self.open_positions.get(market_id)
         if not pos:
@@ -152,7 +173,8 @@ class PositionManager:
 
         # Check stop-loss trigger
         if current_price <= pos.stop_price:
-            self._close(pos, "stop_loss")
+            if close_on_trigger:
+                self._close(pos, "stop_loss")
             return "stop_loss"
 
         return None
@@ -198,6 +220,7 @@ class PositionManager:
     def _close(self, pos: Position, reason: str) -> Position:
         pos.closed = True
         pos.close_reason = reason
+        pos.closed_at = datetime.datetime.utcnow().isoformat()
         pnl_per_dollar = (pos.current_price - pos.entry_price) / pos.entry_price
         pos.pnl_usd = pos.size_usd * pnl_per_dollar
         del self.open_positions[pos.market_id]
@@ -213,6 +236,79 @@ class PositionManager:
     def total_pnl(self) -> float:
         return sum(p.pnl_usd for p in self.closed_positions)
 
+    def open_deployed_usd(self) -> float:
+        return sum(p.size_usd for p in self.open_positions.values())
+
+    def open_planned_risk_usd(self) -> float:
+        return sum(p.planned_risk_usd for p in self.open_positions.values())
+
+    def total_unrealized_pnl(self) -> float:
+        return sum(p.unrealized_pnl_usd for p in self.open_positions.values())
+
+    def target_date_exposure_usd(self, target_date: str) -> float:
+        return sum(
+            p.size_usd for p in self.open_positions.values()
+            if p.target_date == target_date
+        )
+
+    def realized_pnl_since(self, since: datetime.datetime) -> float:
+        total = 0.0
+        for pos in self.closed_positions:
+            if not pos.closed_at:
+                continue
+            try:
+                closed_at = datetime.datetime.fromisoformat(pos.closed_at)
+            except ValueError:
+                continue
+            if closed_at >= since:
+                total += pos.pnl_usd
+        return total
+
+    def closed_count_since(self, since: datetime.datetime) -> int:
+        count = 0
+        for pos in self.closed_positions:
+            if not pos.closed_at:
+                continue
+            try:
+                closed_at = datetime.datetime.fromisoformat(pos.closed_at)
+            except ValueError:
+                continue
+            if closed_at >= since:
+                count += 1
+        return count
+
+    def opened_count_since(self, since: datetime.datetime) -> int:
+        count = 0
+        for pos in list(self.open_positions.values()) + self.closed_positions:
+            if not pos.opened_at:
+                continue
+            try:
+                opened_at = datetime.datetime.fromisoformat(pos.opened_at)
+            except ValueError:
+                continue
+            if opened_at >= since:
+                count += 1
+        return count
+
+    def risk_snapshot(self, now: datetime.datetime | None = None) -> dict:
+        now = now or datetime.datetime.utcnow()
+        day_start = datetime.datetime.combine(now.date(), datetime.time.min)
+        realized_today = self.realized_pnl_since(day_start)
+        unrealized = self.total_unrealized_pnl()
+        net_pnl = self.total_pnl() + unrealized
+        return {
+            "open_positions": len(self.open_positions),
+            "open_deployed_usd": round(self.open_deployed_usd(), 2),
+            "open_planned_risk_usd": round(self.open_planned_risk_usd(), 2),
+            "unrealized_pnl_usd": round(unrealized, 2),
+            "realized_today_usd": round(realized_today, 2),
+            "daily_loss_usd": round(max(0.0, -realized_today - min(0.0, unrealized)), 2),
+            "net_pnl_usd": round(net_pnl, 2),
+            "drawdown_usd": round(max(0.0, -net_pnl), 2),
+            "closed_today": self.closed_count_since(day_start),
+            "opened_today": self.opened_count_since(day_start),
+        }
+
     def win_rate(self) -> Optional[float]:
         finished = [p for p in self.closed_positions if p.pnl_usd != 0]
         if not finished:
@@ -225,5 +321,8 @@ class PositionManager:
             "open_positions": len(self.open_positions),
             "closed_positions": len(self.closed_positions),
             "total_pnl_usd": round(self.total_pnl(), 2),
+            "unrealized_pnl_usd": round(self.total_unrealized_pnl(), 2),
+            "open_deployed_usd": round(self.open_deployed_usd(), 2),
+            "open_planned_risk_usd": round(self.open_planned_risk_usd(), 2),
             "win_rate": self.win_rate(),
         }

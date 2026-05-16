@@ -150,6 +150,21 @@ class MarketScanner:
             logger.debug("Order book parse failed: %s", exc)
             return None
 
+    def get_token_exit_price(self, token_id: str) -> Optional[float]:
+        """
+        Return the current liquidation price for a long outcome token.
+
+        We use best bid because an exit from a long YES/NO token sells into bids.
+        The scanner's entry logic uses effective ask; this method is deliberately
+        conservative for mark-to-market and stop-loss checks.
+        """
+        if not token_id:
+            return None
+        book = self._book_prices(token_id)
+        if not book:
+            return None
+        return book["best_bid"]
+
     def _is_weather_market(self, title: str) -> bool:
         title_lower = title.lower()
         return any(kw in title_lower for kw in self._WEATHER_KEYWORDS)

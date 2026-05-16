@@ -114,6 +114,14 @@ MIN_ORDERBOOK_DEPTH_USD = float(os.getenv("MIN_ORDERBOOK_DEPTH_USD", "1.0"))
 MAX_ORDERBOOK_SLIPPAGE = float(os.getenv("MAX_ORDERBOOK_SLIPPAGE", "0.02"))
 MAX_POSITIONS_PER_CITY_DATE = int(os.getenv("MAX_POSITIONS_PER_CITY_DATE", "1"))
 MAX_EXPOSURE_PER_CITY_DATE_USD = float(os.getenv("MAX_EXPOSURE_PER_CITY_DATE_USD", "2.0"))
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "20"))
+MAX_TOTAL_DEPLOYED_USD = float(os.getenv("MAX_TOTAL_DEPLOYED_USD", "100.0"))
+MAX_PORTFOLIO_HEAT_USD = float(os.getenv("MAX_PORTFOLIO_HEAT_USD", "20.0"))
+MAX_EXPOSURE_PER_TARGET_DATE_USD = float(os.getenv("MAX_EXPOSURE_PER_TARGET_DATE_USD", "20.0"))
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "25.0"))
+MAX_DRAWDOWN_USD = float(os.getenv("MAX_DRAWDOWN_USD", "50.0"))
+MAX_DAILY_TRADES = int(os.getenv("MAX_DAILY_TRADES", "20"))
+MIN_REWARD_RISK_RATIO = float(os.getenv("MIN_REWARD_RISK_RATIO", "1.5"))
 MIN_HOURS_TO_RESOLUTION = float(os.getenv("MIN_HOURS_TO_RESOLUTION", "2"))
 MAX_HOURS_TO_RESOLUTION = float(os.getenv("MAX_HOURS_TO_RESOLUTION", "72"))
 KELLY_FRACTION = float(os.getenv("KELLY_FRACTION", "0.25"))
@@ -158,6 +166,9 @@ MAX_DEBATE_TRANSCRIPTS = int(os.getenv("MAX_DEBATE_TRANSCRIPTS", "200"))
 # archive fallback because they do not exist on Polymarket.
 REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION = (
     os.getenv("REQUIRE_OFFICIAL_POLYMARKET_RESOLUTION", "true").lower() != "false"
+)
+MARK_TO_MARKET_OPEN_POSITIONS = (
+    os.getenv("MARK_TO_MARKET_OPEN_POSITIONS", "true").lower() != "false"
 )
 
 # ─── Monitored Cities ────────────────────────────────────────────────────────

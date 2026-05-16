@@ -59,6 +59,8 @@ class PredictionRecord:
     trade_size_usd: Optional[float] = None
     trade_ev: Optional[float] = None
     trade_pnl_usd: Optional[float] = None
+    trade_close_reason: Optional[str] = None
+    trade_exit_ts: Optional[str] = None
     # Metadata
     agent_estimates: dict[str, float] = field(default_factory=dict)
     created_ts: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
@@ -329,6 +331,32 @@ class ExperienceMemory:
             rec.trade_direction = direction
             rec.trade_size_usd = size_usd
             rec.trade_ev = ev
+            return rec
+
+    def mark_trade_exit(
+        self,
+        *,
+        market_id: str,
+        target_date: str,
+        pnl_usd: float,
+        reason: str,
+    ) -> Optional[PredictionRecord]:
+        """Attach an early trade exit, such as stop-loss, to its prediction."""
+        with self._lock:
+            candidates = [
+                r for r in self.predictions.values()
+                if r.market_id == market_id
+                and r.target_date == target_date
+                and r.trade_direction
+                and r.trade_pnl_usd is None
+            ]
+            if not candidates:
+                return None
+            candidates.sort(key=lambda r: r.created_ts, reverse=True)
+            rec = candidates[0]
+            rec.trade_pnl_usd = pnl_usd
+            rec.trade_close_reason = reason
+            rec.trade_exit_ts = datetime.datetime.utcnow().isoformat()
             return rec
 
     def add_lesson(self, lesson: Lesson) -> None:

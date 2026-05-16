@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from trading.ev_calculator import TradeSignal
+    from trading.position_manager import Position
 
 from config import IOC_URGENCY_HOURS, ORDER_RETRY_MAX
 
@@ -215,6 +216,58 @@ class PolymarketOrderExecutor:
         except Exception as exc:
             logger.warning("cancel_order %s failed: %s", order_id, exc)
             return False
+
+    def place_exit_order(
+        self,
+        position: "Position",
+        token_id: str,
+        price: float,
+    ) -> Optional[str]:
+        """
+        Best-effort live exit for a locally tracked position.
+
+        The local position manager measures `size_usd` as cost basis. CLOB sell
+        size is token shares, so we convert cost basis to approximate shares
+        using entry price. Returns order_id on success, None on failure.
+        """
+        if not self.is_configured() or not token_id:
+            return None
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.constants import SELL
+
+            exit_price = round(max(0.001, min(0.999, price)), 4)
+            shares = round(position.size_usd / max(position.entry_price, 0.001), 2)
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=exit_price,
+                size=shares,
+                side=SELL,
+            )
+            signed_order = self._client.create_order(order_args)
+            response = self._client.post_order(signed_order, OrderType.IOC)
+
+            order_id: Optional[str] = None
+            if isinstance(response, dict):
+                order_id = response.get("orderID") or response.get("order_id")
+            elif hasattr(response, "order_id"):
+                order_id = response.order_id
+
+            if order_id:
+                logger.info(
+                    "LIVE EXIT: %s %s @ %.4f shares=%.2f → %s",
+                    position.direction, position.city, exit_price, shares, order_id,
+                )
+            else:
+                logger.warning("Exit order posted but no order_id in response: %s", response)
+            return order_id
+
+        except Exception as exc:
+            logger.warning(
+                "place_exit_order failed for %s %s: %s",
+                position.direction, position.city, exc,
+            )
+            return None
 
     def get_balance(self) -> float:
         """Return available USDC balance in dollars. Returns 0.0 on failure."""
