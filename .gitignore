@@ -16,6 +16,12 @@ positions.json
 positions_demo.json
 sim_state.json
 
+# Collected research/replay data
+data/raw/
+data/processed/
+data/*.jsonl
+data/*.csv
+
 # Logs
 *.log
 

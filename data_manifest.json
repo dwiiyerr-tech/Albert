@@ -1,0 +1,242 @@
+{
+  "version": 1,
+  "default_storage": {
+    "format": "jsonl",
+    "root": "data/raw"
+  },
+  "sources": [
+    {
+      "name": "polymarket_public_search",
+      "category": "prediction_market",
+      "auth": "none",
+      "endpoint": "https://gamma-api.polymarket.com/public-search",
+      "cadence": "hourly",
+      "output": "data/raw/polymarket/markets_temperature.jsonl",
+      "fields": [
+        "event_id",
+        "event_title",
+        "gamma_market_id",
+        "condition_id",
+        "question",
+        "active",
+        "closed",
+        "end_date",
+        "volume",
+        "liquidity",
+        "outcomes",
+        "outcome_prices",
+        "clob_token_ids",
+        "yes_token_id",
+        "no_token_id"
+      ],
+      "purpose": "Market universe, event metadata, tradable token ids, and baseline market prices."
+    },
+    {
+      "name": "polymarket_clob_book",
+      "category": "prediction_market",
+      "auth": "none",
+      "endpoint": "https://clob.polymarket.com/book",
+      "cadence": "5m_or_cycle",
+      "output": "data/raw/polymarket/orderbooks.jsonl",
+      "fields": [
+        "token_id",
+        "bids",
+        "asks",
+        "min_order_size",
+        "tick_size"
+      ],
+      "purpose": "Executable bid/ask depth, spread, slippage, and mark-to-market exits."
+    },
+    {
+      "name": "polymarket_resolution",
+      "category": "prediction_market",
+      "auth": "none",
+      "endpoint": "https://clob.polymarket.com/markets-by-token/{token_id} + https://gamma-api.polymarket.com/markets",
+      "cadence": "daily_after_close",
+      "output": "data/raw/polymarket/resolutions.jsonl",
+      "fields": [
+        "token_id",
+        "condition_id",
+        "closed",
+        "uma_resolution_status",
+        "outcomes",
+        "outcome_prices",
+        "yes_payout",
+        "no_payout"
+      ],
+      "purpose": "Official settlement labels for supervised learning and trade PnL validation."
+    },
+    {
+      "name": "openmeteo_forecast",
+      "category": "weather",
+      "auth": "none",
+      "endpoint": "https://api.open-meteo.com/v1/forecast",
+      "cadence": "hourly_or_cycle",
+      "output": "data/raw/weather/forecasts.jsonl",
+      "fields": [
+        "city",
+        "lat",
+        "lon",
+        "model",
+        "date",
+        "temperature_2m_max_c",
+        "temperature_2m_min_c",
+        "precipitation_sum_mm",
+        "wind_speed_10m_max_kmh"
+      ],
+      "purpose": "Current ECMWF/GFS features used by Albert's debate and probability estimation."
+    },
+    {
+      "name": "openmeteo_archive",
+      "category": "weather",
+      "auth": "none",
+      "endpoint": "https://archive-api.open-meteo.com/v1/archive",
+      "cadence": "historical_backfill",
+      "output": "data/raw/weather/actuals.jsonl",
+      "fields": [
+        "city",
+        "lat",
+        "lon",
+        "date",
+        "temperature_2m_max_c",
+        "temperature_2m_min_c",
+        "temperature_2m_mean_c",
+        "precipitation_sum_mm",
+        "wind_speed_10m_max_kmh"
+      ],
+      "purpose": "Actual observed outcomes for resolving synthetic/weather fallback labels."
+    },
+    {
+      "name": "aviation_weather_metar",
+      "category": "weather",
+      "auth": "none",
+      "endpoint": "https://aviationweather.gov/api/data/metar",
+      "cadence": "cycle",
+      "output": "data/raw/weather/metar.jsonl",
+      "fields": [
+        "city",
+        "icao",
+        "raw_observation",
+        "obs_time",
+        "temp_c"
+      ],
+      "purpose": "Near-real-time observation anchor for same-day weather markets."
+    },
+    {
+      "name": "binance_spot_klines",
+      "category": "crypto",
+      "auth": "none",
+      "endpoint": "https://api.binance.com/api/v3/klines",
+      "cadence": "historical_backfill_or_hourly",
+      "output": "data/raw/crypto/BTCUSDT_ohlcv.jsonl",
+      "fields": [
+        "symbol",
+        "interval",
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume",
+        "trade_count"
+      ],
+      "purpose": "BTC trend, volatility, drawdown, and risk-regime replay features."
+    },
+    {
+      "name": "binance_futures_funding_rate",
+      "category": "crypto",
+      "auth": "none",
+      "endpoint": "https://fapi.binance.com/fapi/v1/fundingRate",
+      "cadence": "historical_backfill_or_8h",
+      "output": "data/raw/crypto/BTCUSDT_funding.jsonl",
+      "fields": [
+        "symbol",
+        "funding_time",
+        "funding_rate",
+        "mark_price"
+      ],
+      "purpose": "Leverage pressure and crowded-position regime feature."
+    },
+    {
+      "name": "binance_futures_open_interest",
+      "category": "crypto",
+      "auth": "none",
+      "endpoint": "https://fapi.binance.com/futures/data/openInterestHist",
+      "cadence": "historical_backfill_or_hourly",
+      "output": "data/raw/crypto/BTCUSDT_open_interest.jsonl",
+      "fields": [
+        "symbol",
+        "period",
+        "sum_open_interest",
+        "sum_open_interest_value",
+        "timestamp"
+      ],
+      "purpose": "Market participation and leverage expansion/contraction feature."
+    },
+    {
+      "name": "binance_futures_long_short_ratio",
+      "category": "crypto",
+      "auth": "none",
+      "endpoint": "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+      "cadence": "historical_backfill_or_hourly",
+      "output": "data/raw/crypto/BTCUSDT_long_short.jsonl",
+      "fields": [
+        "symbol",
+        "period",
+        "long_short_ratio",
+        "long_account",
+        "short_account",
+        "timestamp"
+      ],
+      "purpose": "Crowding, positioning imbalance, and contrarian risk-regime feature."
+    },
+    {
+      "name": "cboe_vix_historical",
+      "category": "macro",
+      "auth": "none",
+      "endpoint": "https://www.cboe.com/tradable_products/vix/vix_historical_data",
+      "cadence": "daily",
+      "output": "data/raw/macro/vix.csv",
+      "fields": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close"
+      ],
+      "purpose": "Cross-asset volatility regime label."
+    },
+    {
+      "name": "fred_series_observations",
+      "category": "macro",
+      "auth": "FRED_API_KEY",
+      "endpoint": "https://api.stlouisfed.org/fred/series/observations",
+      "cadence": "daily_or_release",
+      "output": "data/raw/macro/fred_series.jsonl",
+      "fields": [
+        "series_id",
+        "date",
+        "value",
+        "realtime_start",
+        "realtime_end"
+      ],
+      "purpose": "Rates, CPI, liquidity, and recession-context features. Requires a FRED key."
+    },
+    {
+      "name": "fomc_calendar",
+      "category": "macro_event",
+      "auth": "none",
+      "endpoint": "https://www.federalreserve.gov/monetarypolicy/fomc.htm",
+      "cadence": "monthly",
+      "output": "data/raw/macro/fomc_calendar.jsonl",
+      "fields": [
+        "meeting_date",
+        "event_type",
+        "statement_url",
+        "minutes_url"
+      ],
+      "purpose": "Event-risk calendar for regime-aware sizing and trade throttling."
+    }
+  ]
+}

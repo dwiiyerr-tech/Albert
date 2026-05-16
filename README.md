@@ -147,6 +147,35 @@ export LLM_ENSEMBLE="anthropic:claude-sonnet-4-6,openai-compatible:gpt-4.1:https
 - **Aviation Weather (NOAA)** — Live METAR temperature observations (free)
 - **Visual Crossing** — Historical temperature validation (free tier)
 - **Polymarket** — Prediction market prices, order book data, and official market resolution via public Gamma/CLOB endpoints
+- **Binance public market data** — BTC OHLCV, futures funding, open interest, and long/short ratio for risk-regime replay
+- **Macro/event data** — VIX, FRED series, and FOMC calendar are tracked in the manifest for later regime labels
+
+---
+
+## Research Data Ingestion
+
+Albert now has a source manifest at `data_manifest.json` and a no-key ingestion CLI for the public datasets that matter first: Polymarket, Open-Meteo, Aviation Weather, and Binance BTC market structure.
+
+```bash
+# Show the full source manifest
+python ingest_data.py --list-sources
+
+# Pull a small recent sample into data/raw/
+python ingest_data.py --source all-lite
+
+# Backfill BTC daily candles for replay
+python ingest_data.py --source btc-ohlcv --symbol BTCUSDT --interval 1d \
+  --start-date 2020-01-01 --end-date 2026-05-16
+
+# Backfill weather actuals for configured Albert cities
+python ingest_data.py --source weather-actuals \
+  --start-date 2020-01-01 --end-date 2026-05-16
+
+# Collect public Polymarket temperature market metadata
+python ingest_data.py --source polymarket-markets --query temperature --limit 100
+```
+
+Generated data is stored under `data/raw/` as JSONL and is ignored by git. This keeps source code clean while still giving Albert replay-ready datasets for regime training and simulation.
 
 ---
 
@@ -157,7 +186,12 @@ Albert/
 ├── main.py                    # Orchestrator + CLI entry point
 ├── config.py                  # All parameters and city list
 ├── weather_data.py            # ECMWF / GFS / METAR data fetching
+├── ingest_data.py             # Public data ingestion CLI for research/replay
+├── data_manifest.json         # Source registry and target schemas
 ├── requirements.txt
+├── data_ingestion/
+│   ├── collectors.py          # Polymarket, weather, and BTC collectors
+│   └── storage.py             # JSONL/date helpers
 ├── simulation/
 │   ├── agents.py              # Multi-agent debate (MiroFish-inspired)
 │   ├── knowledge_graph.py     # City climatology + model accuracy graph
