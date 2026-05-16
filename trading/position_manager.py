@@ -108,6 +108,9 @@ class PositionManager:
             "open": {pid: p.to_dict() for pid, p in self.open_positions.items()},
             "closed": [p.to_dict() for p in self.closed_positions[-200:]],
         }
+        parent = os.path.dirname(os.path.abspath(self._file))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(self._file, "w") as f:
             json.dump(payload, f, indent=2)
 

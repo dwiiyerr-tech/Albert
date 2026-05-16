@@ -102,6 +102,7 @@ POLYMARKET_PROXY_ADDRESS: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
 
 # ─── Runtime Mode ────────────────────────────────────────────────────────────
 DEFAULT_MODE = os.getenv("DEFAULT_MODE", "dry").lower()
+DEMO_POSITIONS_FILE = os.getenv("DEMO_POSITIONS_FILE", "positions_demo.json")
 
 # ─── Trading Parameters ───────────────────────────────────────────────────────
 MIN_EV = float(os.getenv("MIN_EV", "0.10"))

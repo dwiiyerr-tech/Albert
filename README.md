@@ -190,6 +190,13 @@ When `USE_WEATHER_NORMALS=true`, Albert also reads
 `weather_city_month_normals.jsonl` and injects city/month climatology plus
 forecast anomaly into the Morgan, analyst, River, and classic-debate prompts.
 
+For isolated demo runs, pass a separate position file so old paper positions do
+not block fresh signal execution:
+
+```bash
+python main.py --demo --demo-cycles 1 --demo-positions-file .demo_runs/albert_clean_demo_positions.json
+```
+
 ---
 
 ## Project Structure

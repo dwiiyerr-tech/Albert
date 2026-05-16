@@ -15,6 +15,7 @@ memory.json
 positions.json
 positions_demo.json
 sim_state.json
+.demo_runs/
 
 # Collected research/replay data
 data/raw/

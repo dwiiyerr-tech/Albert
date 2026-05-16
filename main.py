@@ -35,6 +35,7 @@ from config import (
     HIGH_SPREAD_THRESHOLD_F,
     MAX_PARALLEL_CITIES,
     DEFAULT_MODE,
+    DEMO_POSITIONS_FILE,
     MAX_POSITIONS_PER_CITY_DATE,
     MAX_EXPOSURE_PER_CITY_DATE_USD,
     MAX_OPEN_POSITIONS,
@@ -99,7 +100,12 @@ class MiroWeatherAgent:
       data → observe → reflect → calibrate → simulate → trade → learn
     """
 
-    def __init__(self, dry_run: bool = True, demo_session=None) -> None:
+    def __init__(
+        self,
+        dry_run: bool = True,
+        demo_session=None,
+        positions_file: str | None = None,
+    ) -> None:
         self.dry_run = dry_run
         self._demo = demo_session
 
@@ -108,8 +114,10 @@ class MiroWeatherAgent:
         self.reporter: Optional[ReportGenerator] = None
         self.scanner = MarketScanner()
         self.resolver = PolymarketResolutionClient()
-        positions_file = "positions_demo.json" if demo_session else "positions.json"
+        if positions_file is None:
+            positions_file = DEMO_POSITIONS_FILE if demo_session else "positions.json"
         self.positions = PositionManager(positions_file=positions_file)
+        self._positions_file = positions_file
 
         # Learning stack
         self.memory = ExperienceMemory()
@@ -1105,7 +1113,7 @@ class MiroWeatherAgent:
         print(f"  Max cycles      : {demo.max_cycles}")
         print(f"  Interval        : {interval}s between cycles")
         print(f"  Sim rounds      : {self.simulator._sim_rounds} (normal: {SIM_ROUNDS})")
-        print(f"  Positions file  : positions_demo.json  (isolated from live)")
+        print(f"  Positions file  : {self._positions_file}  (isolated from live)")
         print(f"{'='*64}\n")
 
         try:
@@ -1212,6 +1220,8 @@ def main() -> None:
                         help="Debate rounds per city in demo to save tokens (default: 1)")
     parser.add_argument("--demo-token-budget", type=int, default=200_000, metavar="N",
                         help="Warn when input tokens exceed this (default: 200000)")
+    parser.add_argument("--demo-positions-file", default=DEMO_POSITIONS_FILE, metavar="PATH",
+                        help="Demo positions state file (default: positions_demo.json or DEMO_POSITIONS_FILE)")
     parser.add_argument("--setup", action="store_true",
                         help="Run interactive setup wizard to configure API keys and trading parameters")
     parser.add_argument("--log-level", default="INFO",
@@ -1257,7 +1267,11 @@ def main() -> None:
             token_budget=args.demo_token_budget,
         )
         session.install_token_tracking()
-        agent = MiroWeatherAgent(dry_run=False, demo_session=session)
+        agent = MiroWeatherAgent(
+            dry_run=False,
+            demo_session=session,
+            positions_file=args.demo_positions_file,
+        )
         agent._ensure_llm_stack()
         assert agent.simulator is not None
         # Override sim rounds to save tokens
