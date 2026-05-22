@@ -11,6 +11,8 @@ __all__ = [
     "MarketFeatures",
     "WeatherNormalStore",
     "WeatherNormal",
+    "DecisionScorecard",
+    "build_decision_scorecard",
 ]
 
 
@@ -40,4 +42,10 @@ def __getattr__(name):
     if name in {"WeatherNormalStore", "WeatherNormal"}:
         from .weather_normals import WeatherNormalStore, WeatherNormal
         return {"WeatherNormalStore": WeatherNormalStore, "WeatherNormal": WeatherNormal}[name]
+    if name in {"DecisionScorecard", "build_decision_scorecard"}:
+        from .decision_scorecard import DecisionScorecard, build_decision_scorecard
+        return {
+            "DecisionScorecard": DecisionScorecard,
+            "build_decision_scorecard": build_decision_scorecard,
+        }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from config import CITIES
 from data_ingestion import DataCollector
+from data_ingestion.collectors import select_polymarket_targets
 from data_ingestion.storage import load_json, parse_date, write_jsonl
 
 
@@ -65,9 +66,33 @@ def _write(path: Path, rows: list[dict], append: bool, dry_run: bool) -> None:
     print(f"Wrote {count} rows -> {path}")
 
 
+def _write_bundle(
+    data_root: Path,
+    query: str,
+    start: dt.date,
+    end: dt.date,
+    rows_by_name: dict[str, list[dict]],
+    append: bool,
+    dry_run: bool,
+) -> None:
+    suffix = f"{start.isoformat()}_{end.isoformat()}"
+    paths = {
+        "markets": data_root / "polymarket" / f"markets_{_safe_name(query)}.jsonl",
+        "orderbooks": data_root / "polymarket" / "orderbooks.jsonl",
+        "price_history": data_root / "polymarket" / f"price_history_{suffix}.jsonl",
+        "trades": data_root / "polymarket" / "data_api_trades.jsonl",
+        "holders": data_root / "polymarket" / "holders.jsonl",
+        "open_interest": data_root / "polymarket" / "open_interest.jsonl",
+        "user_activity": data_root / "polymarket" / "user_activity.jsonl",
+    }
+    for name, rows in rows_by_name.items():
+        _write(paths[name], rows, append, dry_run)
+
+
 def list_sources() -> None:
     manifest = load_json(MANIFEST_PATH)
     print(f"Manifest: {MANIFEST_PATH}")
+    print("- polymarket-pro-refresh             composite          auth=none")
     for source in manifest.get("sources", []):
         auth = source.get("auth", "none")
         print(f"- {source['name']:<36} {source['category']:<18} auth={auth}")
@@ -81,6 +106,43 @@ def run_collection(args) -> None:
     append = bool(args.append)
 
     def collect_one(source: str) -> None:
+        if source == "polymarket-pro-refresh":
+            market_rows = collector.collect_polymarket_markets(query=args.query, limit=args.limit)
+            targets = select_polymarket_targets(market_rows, max_markets=args.max_markets)
+            token_ids = targets["token_ids"]
+            condition_ids = targets["condition_ids"]
+            print(
+                "Polymarket pro refresh targets: "
+                f"{len(targets['markets'])} markets, {len(condition_ids)} conditions, {len(token_ids)} tokens"
+            )
+
+            rows_by_name = {
+                "markets": market_rows,
+                "orderbooks": collector.collect_polymarket_orderbooks(token_ids),
+                "price_history": collector.collect_polymarket_price_history(
+                    token_ids,
+                    start,
+                    end,
+                    interval=args.history_interval,
+                    fidelity=args.fidelity,
+                ),
+                "trades": collector.collect_polymarket_trades(condition_ids, limit=args.limit),
+                "holders": collector.collect_polymarket_holders(
+                    condition_ids,
+                    limit=args.limit,
+                    min_balance=args.min_balance,
+                ),
+                "open_interest": collector.collect_polymarket_open_interest(condition_ids),
+            }
+            if args.user:
+                rows_by_name["user_activity"] = collector.collect_polymarket_user_activity(
+                    args.user,
+                    condition_ids,
+                    limit=args.limit,
+                )
+            _write_bundle(data_root, args.query, start, end, rows_by_name, append, args.dry_run)
+            return
+
         if source == "polymarket-markets":
             rows = collector.collect_polymarket_markets(query=args.query, limit=args.limit)
             _write(data_root / "polymarket" / f"markets_{_safe_name(args.query)}.jsonl", rows, append, args.dry_run)
@@ -200,6 +262,7 @@ def main() -> None:
         "--source",
         choices=[
             "all-lite",
+            "polymarket-pro-refresh",
             "polymarket-markets",
             "polymarket-orderbooks",
             "polymarket-price-history",
@@ -228,6 +291,8 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=7, help="Forecast days for weather-forecast. Default: 7.")
     parser.add_argument("--query", default="temperature", help="Polymarket public-search query. Default: temperature.")
     parser.add_argument("--limit", type=int, default=100, help="Polymarket public-search limit. Default: 100.")
+    parser.add_argument("--max-markets", type=int, default=20,
+                        help="Max active markets to enrich for polymarket-pro-refresh. Default: 20.")
     parser.add_argument("--token-id", action="append", help="CLOB token id for orderbook collection. Repeatable.")
     parser.add_argument("--condition-id", action="append", help="Polymarket condition id. Repeatable.")
     parser.add_argument("--user", help="Polymarket user/profile wallet address for user activity.")

@@ -301,7 +301,7 @@ class RemoteControlCommandHandler:
             "/signals      latest cycle signals",
             "/learning     learning and persona stats",
             "/pnl          profit/loss report now",
-            "/dry_run_once run one dry-run cycle",
+            "/dry_run_once run one demo/paper cycle",
             "/demo_once    run one virtual demo cycle",
             "/pause        pause remote daemon loop",
             "/resume       resume remote daemon loop",
@@ -436,6 +436,8 @@ class RemoteControlCommandHandler:
         return format_pnl_report(self.agent)
 
     def _dry_run_once(self) -> str:
+        if self.demo_runner is not None:
+            return self._demo_once()
         if self.paused:
             return "Albert sedang dipause. Jalankan /resume sebelum dry_run_once."
         if not self._run_lock.acquire(blocking=False):

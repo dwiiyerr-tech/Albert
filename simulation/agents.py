@@ -559,11 +559,11 @@ Respond ONLY with valid JSON:
         scenario_mean_probs: list[float] = []
         for i in range(len(scenarios)):
             analyst_probs = [
-                t.conditional_probs[i]
+                (t.agent_name, t.conditional_probs[i])
                 for t in turns
                 if t.conditional_probs and i < len(t.conditional_probs)
             ]
-            mean = sum(analyst_probs) / len(analyst_probs) if analyst_probs else 0.5
+            mean = self._weighted_mean(analyst_probs) if analyst_probs else 0.5
             scenario_mean_probs.append(mean)
 
         computed_p = sum(

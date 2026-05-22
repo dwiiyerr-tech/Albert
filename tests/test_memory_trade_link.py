@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from learning.memory import ExperienceMemory
+from learning.memory import ExperienceMemory, Lesson
 
 
 class MemoryTradeLinkTests(unittest.TestCase):
@@ -108,6 +108,69 @@ class MemoryTradeLinkTests(unittest.TestCase):
         self.assertAlmostEqual(rec.trade_pnl_usd, -0.25)
         self.assertEqual(rec.trade_close_reason, "stop_loss")
         self.assertIsNotNone(rec.trade_exit_ts)
+
+    def test_overall_stats_preserves_zero_brier_score(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = ExperienceMemory(memory_file=str(Path(tmp.name) / "memory.json"))
+        rec = memory.record_prediction(
+            city="Dallas",
+            target_date="2026-05-17",
+            bucket_low=80,
+            bucket_high=90,
+            consensus_probability=1.0,
+            confidence_level="high",
+            model_spread_f=1.0,
+            agent_probabilities=[1.0],
+            market_price=0.90,
+            market_volume=1000,
+            hours_to_resolution=12,
+            market_id="market-1",
+            ecmwf_f=85,
+            gfs_f=84,
+            metar_f=None,
+        )
+        memory.resolve_prediction(rec.id, 86, True)
+
+        stats = memory.overall_stats()
+
+        self.assertEqual(stats["avg_brier_score"], 0.0)
+
+    def test_overall_stats_counts_unresolved_predictions_and_lessons(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        memory = ExperienceMemory(memory_file=str(Path(tmp.name) / "memory.json"))
+        memory.record_prediction(
+            city="Dallas",
+            target_date="2026-05-17",
+            bucket_low=80,
+            bucket_high=90,
+            consensus_probability=0.70,
+            confidence_level="medium",
+            model_spread_f=1.0,
+            agent_probabilities=[0.70],
+            market_price=0.60,
+            market_volume=1000,
+            hours_to_resolution=12,
+            market_id="market-1",
+            ecmwf_f=85,
+            gfs_f=84,
+            metar_f=None,
+        )
+        memory.add_lesson(Lesson(
+            id="lesson-1",
+            category="market_pattern",
+            city=None,
+            content="Example lesson",
+            confidence=0.7,
+            supporting_records=[],
+        ))
+
+        stats = memory.overall_stats()
+
+        self.assertEqual(stats["total_predictions"], 1)
+        self.assertEqual(stats["resolved_predictions"], 0)
+        self.assertEqual(stats["total_lessons"], 1)
 
 
 if __name__ == "__main__":

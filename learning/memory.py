@@ -543,19 +543,26 @@ class ExperienceMemory:
         }
 
     def overall_stats(self) -> dict:
+        total_predictions = len(self.predictions)
+        total_lessons = len(self.lessons)
         resolved = self.resolved_records()
         if not resolved:
-            return {"total_predictions": 0}
+            return {
+                "total_predictions": total_predictions,
+                "resolved_predictions": 0,
+                "total_lessons": total_lessons,
+            }
         briers = [r.brier_score for r in resolved if r.brier_score is not None]
         avg_brier = sum(briers) / len(briers) if briers else None
         profitable = [r for r in resolved if r.trade_pnl_usd is not None and r.trade_pnl_usd > 0]
         losing = [r for r in resolved if r.trade_pnl_usd is not None and r.trade_pnl_usd <= 0]
         total_pnl = sum(r.trade_pnl_usd for r in resolved if r.trade_pnl_usd is not None)
         return {
-            "total_predictions": len(resolved),
-            "avg_brier_score": round(avg_brier, 4) if avg_brier else None,
+            "total_predictions": total_predictions,
+            "resolved_predictions": len(resolved),
+            "avg_brier_score": round(avg_brier, 4) if avg_brier is not None else None,
             "total_trades": len(profitable) + len(losing),
             "win_rate": len(profitable) / (len(profitable) + len(losing)) if (profitable or losing) else None,
             "total_pnl_usd": round(total_pnl, 2),
-            "total_lessons": len(self.lessons),
+            "total_lessons": total_lessons,
         }

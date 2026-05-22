@@ -139,8 +139,10 @@ class WeatherKnowledgeGraph:
                     for m, r in node.model_accuracy.items()
                 },
             }
-        with open(self._state_file, "w") as f:
+        tmp_file = f"{self._state_file}.tmp"
+        with open(tmp_file, "w") as f:
             json.dump(payload, f, indent=2)
+        os.replace(tmp_file, self._state_file)
         logger.debug("Knowledge graph saved")
 
     # ─── Graph operations ─────────────────────────────────────────────────────

@@ -29,18 +29,21 @@ OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 def _retry_get(url: str, params: dict, retries: int = 3,
                backoff: tuple = (2, 4, 8), timeout: int = 10) -> Optional[dict]:
     """HTTP GET with exponential backoff retry."""
-    for attempt, wait in enumerate(backoff[:retries], start=1):
+    attempts = max(1, retries)
+    for attempt in range(1, attempts + 1):
+        wait = backoff[min(attempt - 1, len(backoff) - 1)] if backoff else 0
         try:
             resp = requests.get(url, params=params, timeout=timeout)
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
-            if attempt <= retries:
+            if attempt < attempts:
                 logger.warning("HTTP attempt %d/%d failed for %s: %s — retrying in %ds",
-                               attempt, retries, url, exc, wait)
-                time.sleep(wait)
+                               attempt, attempts, url, exc, wait)
+                if wait > 0:
+                    time.sleep(wait)
             else:
-                logger.warning("HTTP request failed after %d retries: %s | %s", retries, url, exc)
+                logger.warning("HTTP request failed after %d attempts: %s | %s", attempts, url, exc)
     return None
 
 

@@ -108,6 +108,9 @@ _OUTPUT_COST_PER_TOKEN = 15.00 / 1_000_000   # $15.00 / M output tokens
 # ─── Token budget warning threshold ─────────────────────────────────────────
 DEFAULT_TOKEN_BUDGET = 200_000   # warn (not block) above this many input tokens
 
+_ACTIVE_TOKEN_COUNTER = None
+_ORIGINAL_LLM_TEXT = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -250,23 +253,28 @@ class DemoSession:
         if self._tracking_installed:
             return
 
-        _tracker = self.tokens
-
         try:
             from llm_client import LLMClient
-            _orig_text = LLMClient.text
+
+            global _ACTIVE_TOKEN_COUNTER, _ORIGINAL_LLM_TEXT
+            _ACTIVE_TOKEN_COUNTER = self.tokens
+
+            if _ORIGINAL_LLM_TEXT is None:
+                _ORIGINAL_LLM_TEXT = LLMClient.text
 
             def _tracked_text(self_client, *args, **kwargs):
                 system = kwargs.get("system", "")
                 messages = kwargs.get("messages", [])
                 approx_in = len(str(system)) // 4
                 approx_in += sum(len(str(m.get("content", ""))) // 4 for m in messages)
-                response_text = _orig_text(self_client, *args, **kwargs)
+                response_text = _ORIGINAL_LLM_TEXT(self_client, *args, **kwargs)
                 approx_out = len(response_text) // 4
-                _tracker.add(max(1, approx_in), max(1, approx_out))
+                if _ACTIVE_TOKEN_COUNTER is not None:
+                    _ACTIVE_TOKEN_COUNTER.add(max(1, approx_in), max(1, approx_out))
                 return response_text
 
-            LLMClient.text = _tracked_text
+            if LLMClient.text is not _tracked_text:
+                LLMClient.text = _tracked_text
         except Exception:
             pass
 

@@ -180,20 +180,29 @@ class MarketScanner:
                 return []
         return []
 
-    def _market_end_date(self, market: dict) -> Optional[datetime.date]:
+    def _market_end_datetime(self, market: dict) -> Optional[datetime.datetime]:
         end_date = market.get("endDate") or market.get("endDateIso") or market.get("end_date_iso")
         if not end_date:
             return None
         try:
-            return datetime.datetime.fromisoformat(
+            parsed = datetime.datetime.fromisoformat(
                 str(end_date).replace("Z", "+00:00")
-            ).date()
+            )
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            return parsed.astimezone(datetime.timezone.utc)
         except Exception:
             return None
+
+    def _market_end_date(self, market: dict) -> Optional[datetime.date]:
+        end = self._market_end_datetime(market)
+        return end.date() if end else None
 
     def _hours_until_resolution(self, end_date_iso: str) -> float:
         try:
             end = datetime.datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=datetime.timezone.utc)
             now = datetime.datetime.now(datetime.timezone.utc)
             delta = (end - now).total_seconds() / 3600
             return max(0.0, delta)
@@ -237,7 +246,11 @@ class MarketScanner:
                 no_book["ask_depth_usd"] if no_book else yes_book["ask_depth_usd"],
             )
             volume = float(market.get("volume", 0))
-            hours = self._hours_until_resolution(market.get("endDate", ""))
+            end_at = self._market_end_datetime(market)
+            if end_at is None:
+                return None
+            now = datetime.datetime.now(datetime.timezone.utc)
+            hours = max(0.0, (end_at - now).total_seconds() / 3600)
         except (ValueError, TypeError, IndexError, KeyError) as exc:
             logger.debug("Order book parse failed: %s", exc)
             return None

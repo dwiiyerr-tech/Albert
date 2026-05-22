@@ -26,6 +26,14 @@ SECRET_KEYS = {
     "VISUAL_CROSSING_API_KEY",
 }
 
+SUPPORTED_LLM_PROVIDERS = {
+    "anthropic",
+    "openai",
+    "openai-compatible",
+    "compatible",
+    "mock",
+}
+
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -48,7 +56,7 @@ def run_subcommand(argv: list[str]) -> int:
         "config": show_config,
         "status": show_config,
         "run": lambda: run_python(["main.py", "--run", *rest]),
-        "dry": lambda: run_python(["main.py", "--run", "--dry", *rest]),
+        "dry": lambda: run_python(["main.py", "--demo", "--demo-cycles", "1", *rest]),
         "daemon": lambda: run_python(["main.py", "--daemon", *rest]),
         "tui": lambda: run_python(["main.py", "--tui", *rest]),
         "dashboard": lambda: run_python(["main.py", "--tui", *rest]),
@@ -58,8 +66,13 @@ def run_subcommand(argv: list[str]) -> int:
         "demo_once": lambda: run_python(["main.py", "--demo", "--demo-cycles", "1", *rest]),
         "positions": lambda: run_python(["main.py", "--positions", *rest]),
         "learning": lambda: run_python(["main.py", "--learning-status", *rest]),
+        "scorecard": lambda: run_python(["scorecard.py", *rest]),
+        "health": lambda: run_python(["healthcheck.py", *rest]),
+        "healthcheck": lambda: run_python(["healthcheck.py", *rest]),
         "reflect": lambda: run_python(["main.py", "--reflect", *rest]),
         "ingest": lambda: run_python(["ingest_data.py", *rest]),
+        "refresh_data": lambda: run_python(["ingest_data.py", "--source", "polymarket-pro-refresh", *rest]),
+        "refresh-data": lambda: run_python(["ingest_data.py", "--source", "polymarket-pro-refresh", *rest]),
         "build_features": lambda: run_python(["build_features.py", *rest]),
         "git": lambda: run(["git", *rest]),
     }
@@ -79,7 +92,7 @@ def menu() -> int:
         print("=" * 48)
         print("1. Setup wizard")
         print("2. Show current config")
-        print("3. Run one dry analysis cycle")
+        print("3. Run one demo/dry paper cycle")
         print("4. Run one isolated demo cycle")
         print("5. Run demo mode")
         print("6. Open TUI dashboard")
@@ -87,9 +100,12 @@ def menu() -> int:
         print("8. Start daemon")
         print("9. Show positions")
         print("10. Show learning status")
-        print("11. List data sources")
-        print("12. Build processed features")
-        print("13. Git status")
+        print("11. Show decision scorecard")
+        print("12. Refresh Polymarket pro data")
+        print("13. List data sources")
+        print("14. Build processed features")
+        print("15. Run healthcheck")
+        print("16. Git status")
         print("0. Exit")
         print()
 
@@ -103,7 +119,7 @@ def menu() -> int:
         elif choice == "2":
             show_config()
         elif choice == "3":
-            run_python(["main.py", "--run", "--dry"])
+            run_python(["main.py", "--demo", "--demo-cycles", "1"])
         elif choice == "4":
             run_python(["main.py", "--demo", "--demo-cycles", "1"])
         elif choice == "5":
@@ -119,10 +135,16 @@ def menu() -> int:
         elif choice == "10":
             run_python(["main.py", "--learning-status"])
         elif choice == "11":
-            run_python(["ingest_data.py", "--list-sources"])
+            run_python(["scorecard.py"])
         elif choice == "12":
-            run_python(["build_features.py", "--source", "all"])
+            run_python(["ingest_data.py", "--source", "polymarket-pro-refresh", "--append"])
         elif choice == "13":
+            run_python(["ingest_data.py", "--list-sources"])
+        elif choice == "14":
+            run_python(["build_features.py", "--source", "all"])
+        elif choice == "15":
+            run_python(["healthcheck.py"])
+        elif choice == "16":
             run(["git", "status", "--short", "--branch"])
         else:
             print("Unknown choice.")
@@ -156,6 +178,8 @@ def show_config() -> int:
         "LLM_BASE_URL",
         "LLM_API_KEY",
         "DEFAULT_MODE",
+        "LIVE_TRADING_ENABLED",
+        "DEMO_ONLY_UNTIL",
         "REMOTE_CONTROL_ENABLED",
         "TELEGRAM_BOT_TOKEN",
         "REMOTE_ALLOWED_CHAT_IDS",
@@ -167,6 +191,8 @@ def show_config() -> int:
         value = values.get(key, "")
         if key in SECRET_KEYS:
             value = mask(value)
+        elif key == "LLM_PROVIDER" and value and value.lower() not in SUPPORTED_LLM_PROVIDERS:
+            value = "(invalid unsupported provider, hidden)"
         elif not value:
             value = "(not set)"
         print(f"{key}={value}")
@@ -205,7 +231,7 @@ def print_help() -> int:
     print("  albert setup           run setup wizard")
     print("  albert config          show masked config")
     print("  albert run             run one analysis cycle")
-    print("  albert dry             run one dry analysis cycle")
+    print("  albert dry             run one demo/paper cycle")
     print("  albert demo            run demo mode")
     print("  albert demo-once       run one demo cycle")
     print("  albert tui             open dashboard")
@@ -213,6 +239,9 @@ def print_help() -> int:
     print("  albert daemon          start daemon")
     print("  albert positions       show positions")
     print("  albert learning        show learning status")
+    print("  albert scorecard       score resolved decisions and trades")
+    print("  albert health          check config, LLM, and external APIs")
+    print("  albert refresh-data    collect Polymarket pro data for top active markets")
     print("  albert ingest ARGS     pass args to ingest_data.py")
     print("  albert build-features  build processed features")
     print("  albert git ARGS        pass args to git")

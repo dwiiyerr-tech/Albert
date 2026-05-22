@@ -105,6 +105,16 @@ class RemoteControlTests(unittest.TestCase):
         self.assertIn("DRY-RUN COMPLETE", run)
         self.assertEqual(agent.cycles_run, 1)
 
+    def test_dry_run_once_uses_demo_runner_when_configured(self):
+        handler, agent = self._handler()
+        handler.demo_runner = lambda: "demo result"
+
+        run = handler.handle("/dry_run_once", chat_id=123)
+
+        self.assertIn("DEMO COMPLETE", run)
+        self.assertIn("demo result", run)
+        self.assertEqual(agent.cycles_run, 0)
+
     def test_pnl_and_cycle_report_formatting(self):
         handler, agent = self._handler()
 

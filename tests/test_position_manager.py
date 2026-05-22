@@ -170,6 +170,29 @@ class PositionManagerSettlementTests(unittest.TestCase):
         self.assertAlmostEqual(manager.open_positions["market-1"].size_shares, 30.0)
         self.assertAlmostEqual(manager.open_positions["market-1"].size_usd, 7.5)
 
+    def test_save_uses_atomic_replace_without_leaving_tmp_file(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "positions.json"
+        manager = PositionManager(positions_file=str(path))
+        manager.open_position(
+            market_id="market-1",
+            city="Miami",
+            direction="YES",
+            entry_price=0.25,
+            size_usd=10.0,
+            bucket_low=88,
+            bucket_high=89,
+            target_date="2026-05-17",
+        )
+
+        manager.save()
+
+        self.assertTrue(path.exists())
+        self.assertFalse(Path(f"{path}.tmp").exists())
+        reloaded = PositionManager(positions_file=str(path))
+        self.assertIn("market-1", reloaded.open_positions)
+
 
 if __name__ == "__main__":
     unittest.main()

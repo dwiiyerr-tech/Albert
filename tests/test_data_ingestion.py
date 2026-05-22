@@ -12,6 +12,7 @@ from data_ingestion.collectors import (
     rows_from_polymarket_open_interest,
     rows_from_polymarket_price_history,
     rows_from_polymarket_trades,
+    select_polymarket_targets,
 )
 from data_ingestion.features import build_btc_risk_regimes, build_weather_monthly_normals
 from data_ingestion.storage import write_jsonl
@@ -140,6 +141,29 @@ class DataIngestionParsingTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["market"], "0xcond")
         self.assertEqual(calls[1][1]["limit"], 20)
         self.assertEqual(calls[3][1]["user"], "0xabc")
+
+    def test_select_polymarket_targets_prefers_liquid_markets(self) -> None:
+        rows = [
+            {
+                "condition_id": "cond-small",
+                "yes_token_id": "yes-small",
+                "no_token_id": "no-small",
+                "volume": 10,
+                "liquidity": 5,
+            },
+            {
+                "condition_id": "cond-big",
+                "yes_token_id": "yes-big",
+                "no_token_id": "no-big",
+                "volume": 100,
+                "liquidity": 20,
+            },
+        ]
+
+        targets = select_polymarket_targets(rows, max_markets=1)
+
+        self.assertEqual(targets["condition_ids"], ["cond-big"])
+        self.assertEqual(targets["token_ids"], ["yes-big", "no-big"])
 
     def test_open_interest_paginates(self) -> None:
         calls = []

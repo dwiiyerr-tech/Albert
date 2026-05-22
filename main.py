@@ -23,6 +23,7 @@ import argparse
 import datetime
 import logging
 import math
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,6 +37,9 @@ from config import (
     MAX_PARALLEL_CITIES,
     DEFAULT_MODE,
     DEMO_POSITIONS_FILE,
+    LIVE_TRADING_ENABLED,
+    LIVE_TRADING_CONFIRM,
+    DEMO_ONLY_UNTIL,
     MAX_POSITIONS_PER_CITY_DATE,
     MAX_EXPOSURE_PER_CITY_DATE_USD,
     MAX_OPEN_POSITIONS,
@@ -112,6 +116,36 @@ logger = logging.getLogger(__name__)
 
 # Run persona evolution every N resolved predictions
 PERSONA_EVOLUTION_INTERVAL = 50
+LIVE_TRADING_CONFIRM_PHRASE = "I_ACCEPT_REAL_MONEY_RISK"
+
+
+def live_trading_block_reason(
+    *,
+    today: datetime.date | None = None,
+    enabled: bool = LIVE_TRADING_ENABLED,
+    confirmation: str = LIVE_TRADING_CONFIRM,
+    demo_only_until: str = DEMO_ONLY_UNTIL,
+) -> str:
+    """Return a human-readable reason live trading is blocked, or an empty string."""
+    if today is None:
+        today = datetime.date.today()
+
+    freeze = demo_only_until.strip()
+    if freeze:
+        try:
+            freeze_date = datetime.date.fromisoformat(freeze)
+        except ValueError:
+            return "DEMO_ONLY_UNTIL must be YYYY-MM-DD or blank"
+        if today <= freeze_date:
+            return f"demo-only lock is active until {freeze_date.isoformat()}"
+
+    if not enabled:
+        return "LIVE_TRADING_ENABLED=true is required"
+
+    if confirmation.strip() != LIVE_TRADING_CONFIRM_PHRASE:
+        return f"LIVE_TRADING_CONFIRM must equal {LIVE_TRADING_CONFIRM_PHRASE!r}"
+
+    return ""
 
 
 class MiroWeatherAgent:
@@ -126,6 +160,14 @@ class MiroWeatherAgent:
         demo_session=None,
         positions_file: str | None = None,
     ) -> None:
+        if not dry_run and demo_session is None:
+            block_reason = live_trading_block_reason()
+            if block_reason:
+                raise RuntimeError(
+                    "Live trading is blocked by safety settings: "
+                    f"{block_reason}. Use --demo/--dry while validating."
+                )
+
         self.dry_run = dry_run
         self._demo = demo_session
 
@@ -340,6 +382,10 @@ class MiroWeatherAgent:
                 continue
             target_passed = target < today
             is_public_market = self._is_public_polymarket_market(rec.market_id)
+            # Avoid hundreds of CLOB/Gamma lookups for markets that cannot
+            # resolve yet. Resolution is only meaningful after target day.
+            if not target_passed:
+                continue
             resolved_from_official = False
             temp_f = None
             outcome_yes = None
@@ -1164,20 +1210,34 @@ class MiroWeatherAgent:
                     pos.unrealized_pnl_pct,
                 ))
 
-    def daemon(self, days_ahead: int = 1) -> None:
+    def daemon(self, days_ahead: int = 1, max_cycles: int = 0) -> None:
         """Run continuously, one cycle per UPDATE_INTERVAL_SECONDS."""
-        logger.info("Starting MiroWeather daemon (interval=%ds)", UPDATE_INTERVAL_SECONDS)
+        logger.info(
+            "Starting MiroWeather daemon (interval=%ds, max_cycles=%s)",
+            UPDATE_INTERVAL_SECONDS,
+            max_cycles or "unbounded",
+        )
+        cycles_completed = 0
         while True:
             try:
                 signals = self.run_cycle(days_ahead=days_ahead)
+                cycles_completed += 1
                 logger.info("Cycle complete: %d actionable signals | %d lessons | %d resolved",
                             len(signals), len(self.memory.lessons),
                             len(self.memory.resolved_records()))
+                if max_cycles and cycles_completed >= max_cycles:
+                    logger.info("Daemon reached max_cycles=%d; exiting", max_cycles)
+                    break
             except KeyboardInterrupt:
                 logger.info("Shutting down daemon")
                 break
             except Exception as exc:
                 logger.error("Cycle error: %s", exc, exc_info=True)
+                if max_cycles:
+                    cycles_completed += 1
+                    if cycles_completed >= max_cycles:
+                        logger.info("Daemon reached max_cycles=%d after error; exiting", max_cycles)
+                        break
             time.sleep(UPDATE_INTERVAL_SECONDS)
 
     def run_demo(self, days_ahead: int = 1) -> None:
@@ -1352,6 +1412,7 @@ def _run_telegram_control(args) -> None:
         token=TELEGRAM_BOT_TOKEN,
         handler=handler,
         poll_interval_seconds=REMOTE_POLL_INTERVAL_SECONDS,
+        request_timeout_seconds=1 if args.daemon_cycles else 30,
     )
     notify_targets = notifications.notification_chat_ids or policy.allowed_chat_ids
 
@@ -1379,6 +1440,7 @@ def _run_telegram_control(args) -> None:
     if args.daemon:
         def _daemon_loop() -> None:
             logger.info("Starting remote-managed dry daemon")
+            cycles_completed = 0
             while True:
                 if handler.paused:
                     time.sleep(5)
@@ -1402,6 +1464,14 @@ def _run_telegram_control(args) -> None:
                             duration_seconds=time.monotonic() - started,
                             error=exc,
                         ))
+                cycles_completed += 1
+                if args.daemon_cycles and cycles_completed >= args.daemon_cycles:
+                    logger.info(
+                        "Remote daemon reached max_cycles=%d; stopping Telegram control",
+                        args.daemon_cycles,
+                    )
+                    bot.stop()
+                    return
                 _sleep_interruptibly(UPDATE_INTERVAL_SECONDS)
 
         threading.Thread(target=_daemon_loop, name="telegram-daemon", daemon=True).start()
@@ -1413,15 +1483,18 @@ def _run_telegram_control(args) -> None:
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def main() -> None:
+    raw_args = sys.argv[1:]
     parser = argparse.ArgumentParser(
         description="MiroWeather — Multi-Agent Weather Prediction & Trading Agent with Continuous Learning"
     )
     parser.add_argument("--run", action="store_true",
                         help="Run one analysis + learning cycle and exit")
     parser.add_argument("--dry", action="store_true",
-                        help="Force dry-run mode for --run/--daemon, ignoring DEFAULT_MODE")
+                        help="Alias for safe demo/paper mode; no live orders are sent")
     parser.add_argument("--daemon", action="store_true",
                         help="Run continuously every hour")
+    parser.add_argument("--daemon-cycles", type=int, default=0, metavar="N",
+                        help="Stop daemon after N cycles for bounded soak tests (default: 0=unbounded)")
     parser.add_argument("--telegram-control", "--remote-control", action="store_true",
                         help="Run Telegram remote-control bot (safe commands only by default)")
     parser.add_argument("--positions", action="store_true",
@@ -1455,7 +1528,7 @@ def main() -> None:
                         help="Run interactive setup wizard to configure API keys and trading parameters")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    args = parser.parse_args()
+    args = parser.parse_args(raw_args)
 
     setup_logging(args.log_level)
 
@@ -1497,9 +1570,30 @@ def main() -> None:
                 args.run = True
         elif DEFAULT_MODE == "live" and (args.run or args.daemon or args.tui):
             args.live = True
+    demo_cycles_explicit = any(
+        token == "--demo-cycles" or token.startswith("--demo-cycles=")
+        for token in raw_args
+    )
     if args.dry:
-        args.demo = False
         args.live = False
+        if args.run:
+            args.demo = True
+            if not demo_cycles_explicit:
+                args.demo_cycles = 1
+        elif args.daemon and args.daemon_cycles:
+            args.demo = True
+            args.run = True
+            args.daemon = False
+            if not demo_cycles_explicit:
+                args.demo_cycles = max(1, args.daemon_cycles)
+
+    if args.live:
+        block_reason = live_trading_block_reason()
+        if block_reason:
+            parser.error(
+                "live trading is blocked by safety settings: "
+                f"{block_reason}. Use --demo/--dry while validating."
+            )
 
     if args.telegram_control:
         _run_telegram_control(args)
@@ -1545,7 +1639,7 @@ def main() -> None:
     elif args.run:
         agent.run_cycle(days_ahead=args.days_ahead)
     elif args.daemon:
-        agent.daemon(days_ahead=args.days_ahead)
+        agent.daemon(days_ahead=args.days_ahead, max_cycles=max(0, args.daemon_cycles))
     else:
         parser.print_help()
 

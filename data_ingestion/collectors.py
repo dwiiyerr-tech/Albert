@@ -113,6 +113,40 @@ def flatten_polymarket_events(payload: dict | list, collected_at: str | None = N
     return rows
 
 
+def select_polymarket_targets(market_rows: Iterable[dict], max_markets: int = 20) -> dict:
+    """Return high-liquidity condition/token targets from flattened market rows."""
+    candidates: list[tuple[float, dict]] = []
+    for row in market_rows:
+        condition_id = str(row.get("condition_id") or "")
+        yes_token_id = str(row.get("yes_token_id") or "")
+        no_token_id = str(row.get("no_token_id") or "")
+        if not condition_id and not yes_token_id and not no_token_id:
+            continue
+        volume = _coerce_float(row.get("volume")) or 0.0
+        liquidity = _coerce_float(row.get("liquidity")) or 0.0
+        candidates.append((volume + liquidity, row))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    selected = [row for _, row in candidates[:max(0, max_markets)]]
+
+    condition_ids: list[str] = []
+    token_ids: list[str] = []
+    for row in selected:
+        condition_id = str(row.get("condition_id") or "")
+        if condition_id and condition_id not in condition_ids:
+            condition_ids.append(condition_id)
+        for key in ("yes_token_id", "no_token_id"):
+            token_id = str(row.get(key) or "")
+            if token_id and token_id not in token_ids:
+                token_ids.append(token_id)
+
+    return {
+        "markets": selected,
+        "condition_ids": condition_ids,
+        "token_ids": token_ids,
+    }
+
+
 def rows_from_openmeteo_daily(
     data: dict,
     city: dict,

@@ -119,8 +119,10 @@ class PositionManager:
         parent = os.path.dirname(os.path.abspath(self._file))
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(self._file, "w") as f:
+        tmp_file = f"{self._file}.tmp"
+        with open(tmp_file, "w") as f:
             json.dump(payload, f, indent=2)
+        os.replace(tmp_file, self._file)
 
     # ─── Position lifecycle ───────────────────────────────────────────────────
 

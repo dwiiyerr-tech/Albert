@@ -63,8 +63,8 @@ export VISUAL_CROSSING_API_KEY="..."   # optional, for historical validation
 # export LLM_MODEL="gpt-4.1"
 # export LLM_BASE_URL="https://api.openai.com/v1"
 
-# 3. Run one analysis cycle (dry run — no real trades)
-python main.py --run
+# 3. Run one demo/paper cycle (dry alias — no real trades)
+python main.py --run --dry
 
 # 4. Run in daemon mode (cycles every 60 minutes)
 python main.py --daemon
@@ -75,10 +75,16 @@ python main.py --positions
 # 6. Target a specific day ahead
 python main.py --run --days-ahead 2
 
-# 7. Live trading mode (requires POLYMARKET_API_KEY)
+# 7. Check local config, LLM, and external API health
+python healthcheck.py
+
+# 8. Bounded daemon soak test (2 demo/paper cycles)
+python main.py --daemon --dry --daemon-cycles 2
+
+# 9. Live trading mode (requires explicit safety unlocks)
 python main.py --run --live
 
-# 8. Telegram remote control (safe commands only by default)
+# 10. Telegram remote control (safe commands only by default)
 python main.py --telegram-control
 ```
 
@@ -88,10 +94,11 @@ After installing the local launcher, type:
 albert
 ```
 
-This opens the Albert setup/control menu for setup, dry-run cycles, demo mode,
+This opens the Albert setup/control menu for setup, demo/paper cycles,
 TUI dashboard, Telegram remote control, positions, learning status, and data
 utilities. Direct commands also work, for example `albert setup`,
-`albert control`, `albert demo-once`, and `albert tui`.
+`albert control`, `albert demo-once`, `albert tui`, `albert refresh-data`,
+`albert health`, and `albert scorecard`.
 
 ---
 
@@ -188,8 +195,15 @@ python ingest_data.py --source weather-actuals \
 # Collect public Polymarket temperature market metadata
 python ingest_data.py --source polymarket-markets --query temperature --limit 100
 
+# Refresh top active Polymarket markets with pro decision data
+python ingest_data.py --source polymarket-pro-refresh --query temperature \
+  --limit 100 --max-markets 20 --append
+
 # Build processed features Albert can consume
 python build_features.py --source all
+
+# Score resolved predictions and traded decisions from memory.json
+python scorecard.py
 ```
 
 Generated data is stored under `data/raw/` as JSONL and is ignored by git. This keeps source code clean while still giving Albert replay-ready datasets for regime training and simulation.
@@ -199,6 +213,13 @@ Processed features are written under `data/processed/`. When
 throttle demo/live position size during BTC high-volatility, crash, or risk-off
 regimes. The regime layer only reduces size; it does not increase above the
 normal EV/Kelly recommendation.
+
+`polymarket-pro-refresh` automatically selects the most liquid active markets
+from Gamma search results, then collects CLOB price history, order books,
+Data API trades, holders, and open interest for the selected condition/token
+IDs. The decision gate reads those JSONL files through `MarketFeatureStore`,
+so better raw coverage directly improves `data_quality_score`, live readiness,
+and risk-size throttling.
 
 When `USE_WEATHER_NORMALS=true`, Albert also reads
 `weather_city_month_normals.jsonl` and injects city/month climatology plus
@@ -211,12 +232,24 @@ not block fresh signal execution:
 python main.py --demo --demo-cycles 1 --demo-positions-file .demo_runs/albert_clean_demo_positions.json
 ```
 
+Before and during a multi-week demo, run:
+
+```bash
+python healthcheck.py
+python main.py --daemon --dry --daemon-cycles 2
+```
+
+`healthcheck.py` verifies local state, the configured LLM, Polymarket, weather
+feeds, optional Binance, and Telegram `getMe` when a bot token is configured.
+`healthcheck.py --strict` treats warning-only dependencies, such as optional
+Binance endpoints, as failures.
+
 ---
 
 ## Telegram Remote Control
 
 Albert can run a Telegram polling bot for remote status checks and controlled
-demo/dry-run execution. Live trading is blocked by default.
+demo/paper execution. Live trading is blocked by default.
 
 ```bash
 python main.py --setup
@@ -232,7 +265,7 @@ Safe command set:
 /signals       latest cycle signals
 /learning      learning and persona score summary
 /pnl           profit/loss report now
-/dry_run_once  run one dry-run cycle
+/dry_run_once  run one demo/paper cycle
 /demo_once     run one isolated virtual demo cycle
 /pause         pause remote-managed daemon loop
 /resume        resume remote-managed daemon loop
@@ -265,6 +298,12 @@ daemon:
 
 ```bash
 python main.py --telegram-control --daemon
+```
+
+For a bounded Telegram-managed daemon smoke test, add `--daemon-cycles`:
+
+```bash
+python main.py --telegram-control --daemon --daemon-cycles 1
 ```
 
 With the defaults above, Albert sends a cycle report after every daemon cycle,

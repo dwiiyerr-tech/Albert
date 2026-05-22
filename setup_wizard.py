@@ -64,6 +64,18 @@ console = Console()
 
 _ENV_PATH = Path(__file__).parent / ".env"
 
+_SUPPORTED_LLM_PROVIDERS = {"anthropic", "openai", "openai-compatible", "compatible", "mock"}
+_SETUP_LLM_PROVIDERS = {"anthropic", "openai-compatible", "mock"}
+_SECRET_KEYS = {
+    "LLM_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "POLYMARKET_API_KEY",
+    "POLYMARKET_PRIVATE_KEY",
+    "VISUAL_CROSSING_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+}
+
 # ─── Available LLM models ─────────────────────────────────────────────────────
 
 _LLM_MODELS = [
@@ -170,6 +182,9 @@ def _prompt_int(
 
 def _prompt_choice(label: str, choices: list[tuple[str, str]], default: str) -> str:
     """choices: list of (key, description). Returns selected key."""
+    valid = [k for k, _ in choices]
+    if default not in valid:
+        default = valid[0]
     console.print(f"  [bold]{label}[/]")
     for key, desc in choices:
         marker = "[green]✓[/]" if key == default else " "
@@ -183,7 +198,6 @@ def _prompt_choice(label: str, choices: list[tuple[str, str]], default: str) -> 
             sys.exit(0)
         if not raw:
             return default
-        valid = [k for k, _ in choices]
         if raw in valid:
             return raw
         console.print(f"  [red]Choose one of: {', '.join(valid)}[/]")
@@ -217,6 +231,80 @@ def _mask(val: str, reveal_prefix: int = 8, reveal_suffix: int = 4) -> str:
     return "****"
 
 
+def _safe_float(existing: dict, key: str, default: float) -> float:
+    raw = str(existing.get(key, "")).strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        console.print(f"  [yellow]Ignoring invalid {key}; using default {default}.[/]")
+        return default
+
+
+def _safe_int(existing: dict, key: str, default: int) -> int:
+    raw = str(existing.get(key, "")).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        try:
+            return int(float(raw))
+        except ValueError:
+            console.print(f"  [yellow]Ignoring invalid {key}; using default {default}.[/]")
+            return default
+
+
+def _looks_like_misplaced_secret(value: str) -> bool:
+    clean = value.strip()
+    if not clean or clean.lower() in _SUPPORTED_LLM_PROVIDERS:
+        return False
+    if "://" in clean or len(clean) < 20:
+        return False
+    return any(ch in clean for ch in ("_", "-", "."))
+
+
+def _existing_llm_api_key(existing: dict) -> tuple[str, bool]:
+    key = (
+        existing.get("LLM_API_KEY", "")
+        or existing.get("ANTHROPIC_API_KEY", "")
+        or existing.get("OPENAI_API_KEY", "")
+    )
+    if key:
+        return key, False
+
+    provider_value = existing.get("LLM_PROVIDER", "")
+    if _looks_like_misplaced_secret(provider_value):
+        return provider_value, True
+    return "", False
+
+
+def _default_llm_provider(existing: dict) -> str:
+    current = existing.get("LLM_PROVIDER", "anthropic").strip().lower()
+    if current in _SETUP_LLM_PROVIDERS:
+        return current
+    if current in {"openai", "compatible"}:
+        return "openai-compatible"
+    if existing.get("LLM_MODEL", "").strip().lower() == "mock":
+        return "mock"
+    return "anthropic"
+
+
+def _warn_existing_env_issues(existing: dict) -> None:
+    provider = existing.get("LLM_PROVIDER", "").strip()
+    if provider and provider.lower() not in _SUPPORTED_LLM_PROVIDERS:
+        console.print(
+            "  [yellow]Existing LLM_PROVIDER is unsupported. "
+            "The wizard will replace it with a valid provider and will not print the old value.[/]"
+        )
+        if _looks_like_misplaced_secret(provider):
+            console.print(
+                "  [yellow]It also looks like an API key was saved in LLM_PROVIDER; "
+                "the wizard can reuse it as LLM_API_KEY if you choose a real provider.[/]"
+            )
+
+
 # ─── .env reader / writer ─────────────────────────────────────────────────────
 
 def _read_existing_env() -> dict[str, str]:
@@ -233,7 +321,8 @@ def _read_existing_env() -> dict[str, str]:
     return existing
 
 
-def _save_env(settings: dict[str, str]) -> None:
+def _save_env(settings: dict[str, str], existing: dict[str, str] | None = None) -> None:
+    existing = existing or {}
     sections = [
         ("# ─── LLM API ─────────────────────────────────────────────────────────────",
          ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL",
@@ -244,7 +333,7 @@ def _save_env(settings: dict[str, str]) -> None:
         ("# ─── Weather Data ────────────────────────────────────────────────────────",
          ["VISUAL_CROSSING_API_KEY"]),
         ("# ─── Trading Mode ────────────────────────────────────────────────────────",
-         ["DEFAULT_MODE"]),
+         ["DEFAULT_MODE", "LIVE_TRADING_ENABLED", "LIVE_TRADING_CONFIRM", "DEMO_ONLY_UNTIL"]),
         ("# ─── Remote Control / Telegram ─────────────────────────────────────────",
          ["REMOTE_CONTROL_ENABLED", "REMOTE_CONTROL_PROVIDER", "TELEGRAM_BOT_TOKEN",
           "REMOTE_ALLOWED_CHAT_IDS", "REMOTE_ALLOWED_COMMANDS", "REMOTE_ALLOW_LIVE",
@@ -275,6 +364,20 @@ def _save_env(settings: dict[str, str]) -> None:
             if v:
                 lines.append(f"{k}={v}")
 
+    known_keys = {key for _, keys in sections for key in keys}
+    preserved = [
+        (key, value)
+        for key, value in existing.items()
+        if key not in known_keys and key not in settings and value
+    ]
+    if preserved:
+        lines += [
+            "",
+            "# ─── Other Existing Settings ───────────────────────────────────────────",
+        ]
+        for key, value in preserved:
+            lines.append(f"{key}={value}")
+
     with open(_ENV_PATH, "w") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -284,7 +387,7 @@ def _save_env(settings: dict[str, str]) -> None:
 def _step_llm(existing: dict, settings: dict, step: int, total: int) -> None:
     _header(step, total, "LLM API")
 
-    current_provider = existing.get("LLM_PROVIDER", "anthropic")
+    current_provider = _default_llm_provider(existing)
     provider = _prompt_choice(
         "LLM provider:",
         [
@@ -292,18 +395,20 @@ def _step_llm(existing: dict, settings: dict, step: int, total: int) -> None:
             ("openai-compatible", "OpenAI-compatible /chat/completions API"),
             ("mock", "Offline deterministic responses for smoke tests only"),
         ],
-        default=current_provider if current_provider in {"anthropic", "openai-compatible", "mock"} else "anthropic",
+        default=current_provider,
     )
     settings["LLM_PROVIDER"] = provider
 
     console.print()
-    existing_key = existing.get("LLM_API_KEY") or existing.get("ANTHROPIC_API_KEY") or existing.get("OPENAI_API_KEY", "")
+    existing_key, key_was_misplaced = _existing_llm_api_key(existing)
     if provider == "mock":
         settings["LLM_API_KEY"] = ""
     else:
         console.print("  [bold]LLM_API_KEY[/] [red](required)[/]")
         if existing_key:
             console.print(f"  [dim]Current: {_mask(existing_key)}[/]")
+            if key_was_misplaced:
+                console.print("  [yellow]Recovered from the old LLM_PROVIDER value for this run.[/]")
         key = _prompt_secret("  Enter key", required=not existing_key, current=existing_key)
         settings["LLM_API_KEY"] = key or existing_key
 
@@ -411,7 +516,7 @@ def _step_wallet(existing: dict, settings: dict, step: int, total: int) -> None:
         )
         settings["POLYMARKET_PROXY_ADDRESS"] = proxy
     else:
-        settings["POLYMARKET_PROXY_ADDRESS"] = existing_proxy
+        settings["POLYMARKET_PROXY_ADDRESS"] = ""
 
     # Visual Crossing (weather data, minor — fold in here)
     console.print()
@@ -427,6 +532,8 @@ def _step_trading_mode(existing: dict, settings: dict, step: int, total: int) ->
     _header(step, total, "Trading Mode")
 
     current_mode = existing.get("DEFAULT_MODE", "dry")
+    if current_mode not in {"dry", "demo", "live"}:
+        current_mode = "dry"
     mode = _prompt_choice(
         "Default mode when running Albert:",
         [
@@ -441,6 +548,36 @@ def _step_trading_mode(existing: dict, settings: dict, step: int, total: int) ->
         console.print()
         console.print("  [bold yellow]⚠  Live mode will execute real trades using your private key.[/]")
         console.print("  [dim]Override at runtime with: python main.py --live  or  --demo[/]")
+
+    console.print()
+    live_enabled = False
+    if mode == "live":
+        live_enabled = _prompt_bool(
+            "Enable the live-trading safety switch?",
+            default=existing.get("LIVE_TRADING_ENABLED", "false").lower() == "true",
+            description="Live orders remain blocked unless this is enabled and the confirmation phrase is set.",
+        )
+    else:
+        console.print("  [dim]Live-trading safety switch remains disabled outside live default mode.[/]")
+    settings["LIVE_TRADING_ENABLED"] = "true" if live_enabled else "false"
+
+    if live_enabled:
+        settings["LIVE_TRADING_CONFIRM"] = _prompt_str(
+            "LIVE_TRADING_CONFIRM",
+            default=existing.get("LIVE_TRADING_CONFIRM", ""),
+            required=True,
+            description="Must exactly equal I_ACCEPT_REAL_MONEY_RISK before live orders are allowed.",
+        )
+    else:
+        settings["LIVE_TRADING_CONFIRM"] = ""
+
+    console.print()
+    settings["DEMO_ONLY_UNTIL"] = _prompt_str(
+        "DEMO_ONLY_UNTIL",
+        default=existing.get("DEMO_ONLY_UNTIL", ""),
+        required=False,
+        description="Optional YYYY-MM-DD date. While today is on/before this date, live mode is blocked.",
+    )
 
 
 def _step_remote_control(existing: dict, settings: dict, step: int, total: int) -> None:
@@ -499,7 +636,7 @@ def _step_remote_control(existing: dict, settings: dict, step: int, total: int) 
     console.print()
     settings["REMOTE_POLL_INTERVAL_SECONDS"] = str(_prompt_float(
         "REMOTE_POLL_INTERVAL_SECONDS",
-        default=float(existing.get("REMOTE_POLL_INTERVAL_SECONDS", "2.0")),
+        default=_safe_float(existing, "REMOTE_POLL_INTERVAL_SECONDS", 2.0),
         description="Seconds between Telegram polling retries after empty/error responses.",
         min_val=0.5,
     ))
@@ -531,7 +668,7 @@ def _step_remote_control(existing: dict, settings: dict, step: int, total: int) 
     console.print()
     settings["REMOTE_PNL_REPORT_INTERVAL_HOURS"] = str(_prompt_float(
         "REMOTE_PNL_REPORT_INTERVAL_HOURS",
-        default=float(existing.get("REMOTE_PNL_REPORT_INTERVAL_HOURS", "24.0")),
+        default=_safe_float(existing, "REMOTE_PNL_REPORT_INTERVAL_HOURS", 24.0),
         description="Hours between automatic P&L reports. Use 24 for once per day.",
         min_val=0.25,
     ))
@@ -544,7 +681,7 @@ def _step_remote_control(existing: dict, settings: dict, step: int, total: int) 
     console.print()
     settings["REMOTE_DEMO_BALANCE"] = str(_prompt_float(
         "REMOTE_DEMO_BALANCE",
-        default=float(existing.get("REMOTE_DEMO_BALANCE", "1000.0")),
+        default=_safe_float(existing, "REMOTE_DEMO_BALANCE", 1000.0),
         description="Virtual wallet balance used by /demo_once.",
         min_val=1.0,
     ))
@@ -558,14 +695,14 @@ def _step_remote_control(existing: dict, settings: dict, step: int, total: int) 
     console.print()
     settings["REMOTE_DEMO_TOKEN_BUDGET"] = str(_prompt_int(
         "REMOTE_DEMO_TOKEN_BUDGET",
-        default=int(existing.get("REMOTE_DEMO_TOKEN_BUDGET", "200000")),
+        default=_safe_int(existing, "REMOTE_DEMO_TOKEN_BUDGET", 200000),
         description="Input token warning budget for /demo_once.",
         min_val=1000,
     ))
     console.print()
     settings["REMOTE_DEMO_SIM_ROUNDS"] = str(_prompt_int(
         "REMOTE_DEMO_SIM_ROUNDS",
-        default=int(existing.get("REMOTE_DEMO_SIM_ROUNDS", "1")),
+        default=_safe_int(existing, "REMOTE_DEMO_SIM_ROUNDS", 1),
         description="Debate rounds per city for /demo_once.",
         min_val=1,
         max_val=10,
@@ -577,35 +714,35 @@ def _step_risk(existing: dict, settings: dict, step: int, total: int) -> None:
 
     settings["MIN_EV"] = str(_prompt_float(
         "MIN_EV",
-        default=float(existing.get("MIN_EV", "0.10")),
+        default=_safe_float(existing, "MIN_EV", 0.10),
         description="Minimum expected value to enter a trade (higher = more selective).",
         min_val=0.01, max_val=1.0,
     ))
     console.print()
     settings["KELLY_FRACTION"] = str(_prompt_float(
         "KELLY_FRACTION",
-        default=float(existing.get("KELLY_FRACTION", "0.25")),
+        default=_safe_float(existing, "KELLY_FRACTION", 0.25),
         description="Fractional Kelly cap — fraction of the full Kelly stake to actually use.",
         min_val=0.01, max_val=1.0,
     ))
     console.print()
     settings["MAX_TRADE_SIZE_USD"] = str(_prompt_float(
         "MAX_TRADE_SIZE_USD",
-        default=float(existing.get("MAX_TRADE_SIZE_USD", "20.0")),
+        default=_safe_float(existing, "MAX_TRADE_SIZE_USD", 20.0),
         description="Hard cap on USD per single trade, regardless of Kelly.",
         min_val=1.0,
     ))
     console.print()
     settings["STOP_LOSS_PCT"] = str(_prompt_float(
         "STOP_LOSS_PCT",
-        default=float(existing.get("STOP_LOSS_PCT", "0.20")),
+        default=_safe_float(existing, "STOP_LOSS_PCT", 0.20),
         description="Close position when unrealized loss exceeds this fraction (0.20 = 20%).",
         min_val=0.01, max_val=0.99,
     ))
     console.print()
     settings["TRAILING_STOP_TRIGGER"] = str(_prompt_float(
         "TRAILING_STOP_TRIGGER",
-        default=float(existing.get("TRAILING_STOP_TRIGGER", "0.20")),
+        default=_safe_float(existing, "TRAILING_STOP_TRIGGER", 0.20),
         description="Activate trailing stop after this fraction of profit (0.20 = 20%).",
         min_val=0.01, max_val=0.99,
     ))
@@ -616,28 +753,28 @@ def _step_filters(existing: dict, settings: dict, step: int, total: int) -> None
 
     settings["MIN_VOLUME"] = str(_prompt_float(
         "MIN_VOLUME",
-        default=float(existing.get("MIN_VOLUME", "500")),
+        default=_safe_float(existing, "MIN_VOLUME", 500),
         description="Skip illiquid markets below this contract volume.",
         min_val=0,
     ))
     console.print()
     settings["MAX_SPREAD"] = str(_prompt_float(
         "MAX_SPREAD",
-        default=float(existing.get("MAX_SPREAD", "0.03")),
+        default=_safe_float(existing, "MAX_SPREAD", 0.03),
         description="Skip wide-spread markets above this bid-ask fraction (0.03 = 3%).",
         min_val=0.001, max_val=0.5,
     ))
     console.print()
     settings["MIN_HOURS_TO_RESOLUTION"] = str(_prompt_float(
         "MIN_HOURS_TO_RESOLUTION",
-        default=float(existing.get("MIN_HOURS_TO_RESOLUTION", "2")),
+        default=_safe_float(existing, "MIN_HOURS_TO_RESOLUTION", 2),
         description="Skip markets resolving in fewer hours than this.",
         min_val=0,
     ))
     console.print()
     settings["MAX_HOURS_TO_RESOLUTION"] = str(_prompt_float(
         "MAX_HOURS_TO_RESOLUTION",
-        default=float(existing.get("MAX_HOURS_TO_RESOLUTION", "72")),
+        default=_safe_float(existing, "MAX_HOURS_TO_RESOLUTION", 72),
         description="Skip markets resolving further out than this many hours.",
         min_val=1,
     ))
@@ -648,7 +785,7 @@ def _step_simulation(existing: dict, settings: dict, step: int, total: int) -> N
 
     settings["SIM_ROUNDS"] = str(_prompt_int(
         "SIM_ROUNDS",
-        default=int(existing.get("SIM_ROUNDS", "3")),
+        default=_safe_int(existing, "SIM_ROUNDS", 3),
         description="Debate rounds per city in classic mode (each round = API calls per analyst).",
         min_val=1, max_val=10,
     ))
@@ -681,21 +818,21 @@ def _step_simulation(existing: dict, settings: dict, step: int, total: int) -> N
     console.print()
     settings["HIGH_SPREAD_THRESHOLD_F"] = str(_prompt_float(
         "HIGH_SPREAD_THRESHOLD_F",
-        default=float(existing.get("HIGH_SPREAD_THRESHOLD_F", "8.0")),
+        default=_safe_float(existing, "HIGH_SPREAD_THRESHOLD_F", 8.0),
         description="°F model disagreement above which confidence is forced to 'low'.",
         min_val=0.0,
     ))
     console.print()
     settings["UPDATE_INTERVAL_SECONDS"] = str(_prompt_int(
         "UPDATE_INTERVAL_SECONDS",
-        default=int(existing.get("UPDATE_INTERVAL_SECONDS", "3600")),
+        default=_safe_int(existing, "UPDATE_INTERVAL_SECONDS", 3600),
         description="Seconds between daemon cycles (3600 = 1 hour).",
         min_val=60,
     ))
     console.print()
     settings["CONSENSUS_THRESHOLD"] = str(_prompt_float(
         "CONSENSUS_THRESHOLD",
-        default=float(existing.get("CONSENSUS_THRESHOLD", "0.65")),
+        default=_safe_float(existing, "CONSENSUS_THRESHOLD", 0.65),
         description="Probability threshold for 'high confidence' signal label.",
         min_val=0.5, max_val=0.99,
     ))
@@ -703,11 +840,6 @@ def _step_simulation(existing: dict, settings: dict, step: int, total: int) -> N
 
 def _step_review(settings: dict, step: int, total: int) -> bool:
     _header(step, total, "Review & Save")
-
-    # Sensitive keys — shown masked; everything else shown plainly
-    _SECRET_KEYS = {"LLM_API_KEY", "ANTHROPIC_API_KEY", "POLYMARKET_API_KEY",
-                    "POLYMARKET_PRIVATE_KEY", "VISUAL_CROSSING_API_KEY",
-                    "TELEGRAM_BOT_TOKEN"}
 
     table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
     table.add_column("Setting", style="bold", min_width=30)
@@ -717,7 +849,7 @@ def _step_review(settings: dict, step: int, total: int) -> bool:
         "LLM API":           ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL", "LLM_ENSEMBLE"],
         "Polymarket Wallet":  ["POLYMARKET_API_KEY", "POLYMARKET_PRIVATE_KEY", "POLYMARKET_PROXY_ADDRESS"],
         "Weather Data":       ["VISUAL_CROSSING_API_KEY"],
-        "Trading Mode":       ["DEFAULT_MODE"],
+        "Trading Mode":       ["DEFAULT_MODE", "LIVE_TRADING_ENABLED", "LIVE_TRADING_CONFIRM", "DEMO_ONLY_UNTIL"],
         "Remote Control":     ["REMOTE_CONTROL_ENABLED", "REMOTE_CONTROL_PROVIDER",
                                "TELEGRAM_BOT_TOKEN", "REMOTE_ALLOWED_CHAT_IDS",
                                "REMOTE_ALLOWED_COMMANDS", "REMOTE_ALLOW_LIVE",
@@ -776,6 +908,8 @@ def run_wizard() -> None:
         padding=(1, 2),
     ))
 
+    _warn_existing_env_issues(existing)
+
     _step_llm(existing, settings, 1, STEPS)
     _step_wallet(existing, settings, 2, STEPS)
     _step_trading_mode(existing, settings, 3, STEPS)
@@ -788,7 +922,7 @@ def run_wizard() -> None:
         console.print("\n  [yellow]Settings not saved. Run the wizard again to configure.[/]")
         return
 
-    _save_env(settings)
+    _save_env(settings, existing)
     console.print()
     console.print(Panel(
         Text.from_markup(
@@ -806,3 +940,7 @@ def run_wizard() -> None:
         border_style="green",
         padding=(1, 2),
     ))
+
+
+if __name__ == "__main__":
+    run_wizard()
